@@ -1,0 +1,25 @@
+/* Styles propres à la démo en ligne. */
+.topbar { top: env(safe-area-inset-top, 0px); }
+.demo-pill {
+  font-size: .65rem; font-weight: 800; letter-spacing: .08em; padding: .15rem .45rem;
+  border-radius: 999px; background: rgba(255, 255, 255, .18); color: #fff; flex: none;
+}
+@media (max-width: 420px) { .demo-pill { display: none; } }
+.demo-note {
+  display: grid; gap: .3rem; text-align: left; padding: .8rem .9rem; border-radius: 12px;
+  background: var(--surface-2); border: 1px dashed var(--border); font-size: .88rem; color: var(--text-2);
+}
+.demo-note strong { color: var(--text); }
+.demo-note code { font-weight: 700; color: var(--primary-strong); }
+.demo-note .btn { justify-self: start; margin-top: .3rem; }
+.csv-text { font: 12px/1.45 ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; white-space: pre; resize: vertical; }
+.ticket-preview {
+  width: min(300px, 100%); margin: 0 auto; padding: 14px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--surface); color: var(--text); font: 12px/1.4 "Courier New", monospace;
+}
+.ticket-preview hr { border: 0; border-top: 1px dashed var(--muted); margin: 6px 0; }
+.ticket-preview .t-center { text-align: center; }
+.ticket-preview .t-strong { font-weight: 700; }
+.ticket-preview .t-big { font-size: 14px; }
+.ticket-preview .t-line { display: flex; justify-content: space-between; gap: 8px; }
+.ticket-preview .t-sub { font-size: 11px; padding-left: 12px; color: var(--text-2); }

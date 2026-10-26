@@ -258,9 +258,9 @@ setInterval(() => {
 const NAV = [
   { href: '#/', icon: '🏠', label: 'Accueil', match: /^#\/(famille\/\d+)?$/ },
   { href: '#/tables', icon: '🪑', label: 'Tables', match: /^#\/tables/ },
-  { href: '#/commandes', icon: '🧾', label: 'Commandes', match: /^#\/commande/, badge: 'open-count' },
-  { href: '#/historique', icon: '📅', label: 'Historique', match: /^#\/historique/ },
-  { href: '#/statistiques', icon: '📊', label: 'Statistiques', match: /^#\/statistiques/, admin: true },
+  { href: '#/commandes', icon: '🧾', label: 'Commandes', short: 'Cmdes', match: /^#\/commande/, badge: 'open-count' },
+  { href: '#/historique', icon: '📅', label: 'Historique', short: 'Histo.', match: /^#\/historique/ },
+  { href: '#/statistiques', icon: '📊', label: 'Statistiques', short: 'Stats', match: /^#\/statistiques/, admin: true },
   { href: '#/stock', icon: '📦', label: 'Stock', match: /^#\/stock/, admin: true, badge: 'stock-alerts' },
   { href: '#/gestion', icon: '⚙️', label: 'Gestion', match: /^#\/gestion/, admin: true },
 ];
@@ -268,7 +268,8 @@ const NAV = [
 function renderNav() {
   $('#nav').innerHTML = NAV.filter((n) => !n.admin || isAdmin()).map((n) => `
     <a href="${n.href}" data-match="${n.match.source}">
-      <span class="ico" aria-hidden="true">${n.icon}</span><span>${n.label}</span>
+      <span class="ico" aria-hidden="true">${n.icon}</span><span class="nav-label">${n.label}</span>
+      <span class="nav-short" aria-hidden="true">${n.short ?? n.label}</span>
       ${n.badge ? `<span class="badge badge-count" id="${n.badge}" hidden></span>` : ''}
     </a>`).join('');
 }

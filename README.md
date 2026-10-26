@@ -120,6 +120,14 @@ commandes et paiements enregistrés.
 Sécurité : mots de passe hachés (scrypt), session par cookie `HttpOnly` / `SameSite=Strict`,
 limitation des tentatives de connexion, contrôle des rôles côté serveur, en-têtes de sécurité (CSP).
 
+## Démo sans serveur
+
+`npm run build:demo` génère `demo/dist/ice-manager-demo.html`, une page autonome qui embarque
+l'interface, le code serveur (exécuté dans le navigateur) et SQLite en WebAssembly (sql.js).
+Elle contient une semaine de ventes d'exemple ; les données restent dans le navigateur du visiteur.
+Comptes : `admin` / `admin123` (responsable) et `awa` / `serveur1` (serveur).
+Dans cette démo, l'impression affiche un aperçu du ticket et les exports s'affichent pour être copiés.
+
 ## Tests
 
 ```bash
