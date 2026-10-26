@@ -3,6 +3,7 @@
 const { badRequest, notFound, conflict, toInt, toText } = require('../http');
 const { transaction } = require('../db');
 const { nowLocal, isIsoDate } = require('../time');
+const { applyStockMovement } = require('../stock');
 
 const MAX_QTY = 1000;
 const STATUSES = ['open', 'paid', 'cancelled'];
@@ -123,8 +124,8 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
     const findLine = db.prepare('SELECT id FROM order_items WHERE order_id = ? AND product_id = ? AND unit_price = ?');
     const bumpLine = db.prepare('UPDATE order_items SET quantity = quantity + ?, updated_at = ? WHERE id = ?');
     const insertLine = db.prepare(`INSERT INTO order_items
-      (order_id, product_id, product_name, family_name, unit_price, quantity, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+      (order_id, product_id, product_name, family_name, unit_price, unit_cost, quantity, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
 
     for (const { product_id, quantity } of items) {
       const p = getProduct.get(product_id);
@@ -138,7 +139,7 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
       }
       const line = findLine.get(orderId, product_id, p.price);
       if (line) bumpLine.run(quantity, now, line.id);
-      else insertLine.run(orderId, product_id, p.name, p.family_name, p.price, quantity, now, now);
+      else insertLine.run(orderId, product_id, p.name, p.family_name, p.price, p.cost_price, quantity, now, now);
     }
     recomputeTotal(orderId, now);
   }
@@ -275,9 +276,14 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
       if (fullyPaid) {
         db.prepare("UPDATE orders SET paid_amount = ?, status = 'paid', closed_at = ?, updated_at = ? WHERE id = ?")
           .run(paid, now, now, id);
-        // Mise à jour du stock des produits suivis.
-        const dec = db.prepare('UPDATE products SET stock = stock - ?, updated_at = ? WHERE id = ? AND track_stock = 1');
-        for (const item of order.items) dec.run(item.quantity, now, item.product_id);
+        // Mise à jour du stock des produits suivis (mouvement « vente »).
+        const tracked = db.prepare('SELECT track_stock FROM products WHERE id = ?');
+        for (const item of order.items) {
+          if (!tracked.get(item.product_id)?.track_stock) continue;
+          applyStockMovement(db, {
+            productId: item.product_id, type: 'vente', delta: -item.quantity, orderId: id, userId: req.user.id, at: now,
+          });
+        }
       } else {
         db.prepare('UPDATE orders SET paid_amount = ?, updated_at = ? WHERE id = ?').run(paid, now, id);
       }

@@ -54,7 +54,30 @@ Sauvegarde : il suffit de copier le dossier `data/` (application arrêtée).
 
 Autres fonctions : correction des quantités tant que la commande est ouverte, changement de table,
 annulation (responsable, si aucun paiement), vue des tables libres/occupées, historique par date,
-statistiques par jour ou par période (aujourd'hui, hier, 7 jours, mois, dates libres), impression.
+statistiques par jour ou par période (aujourd'hui, hier, 7 jours, mois, dates libres), impression
+de l'**addition** (commande ouverte) ou du **reçu** (commande payée) au format ticket de caisse 80 mm.
+
+### Gestion des stocks (écran « Stock », responsable)
+
+Le suivi du stock s'active produit par produit (Gestion → Produits → « Activer le suivi du stock »).
+
+- **Entrée** : réception de marchandises, avec prix d'achat unitaire facultatif (met à jour le prix d'achat).
+- **Perte** : casse, offert, périmé…, avec motif.
+- **Inventaire** : saisir la quantité réellement comptée ; l'écart est enregistré automatiquement.
+- **Vente** : déduite automatiquement à la clôture (paiement intégral) d'une commande.
+- Chaque mouvement est historisé (date, quantité, stock après, commande liée, auteur, note).
+- Les quantités sur commandes ouvertes sont **réservées** : on ne peut pas commander plus que le
+  stock disponible.
+- **Seuil d'alerte** par produit : les produits en stock bas ou en rupture sont signalés sur le
+  tableau de bord et dans le menu.
+
+### Rapports financiers
+
+- Prix d'achat par produit → **coût d'achat des ventes**, **marge brute** et taux de marge dans les
+  statistiques (le prix d'achat est figé au moment de la commande, comme le prix de vente).
+- **Encaissements par utilisateur**, avec la part en espèces à remettre en caisse.
+- **Exports Excel (CSV)** : ventes par produit, commandes, encaissements (écran Statistiques, pour la
+  période choisie), état du stock et mouvements de stock (écran Stock).
 
 ### Rôles
 
@@ -82,12 +105,16 @@ server/
   routes/orders.js  commandes, ajouts d'articles, paiements, annulation, transfert
   routes/stats.js   tableau de bord et statistiques
   routes/users.js   utilisateurs
+  routes/stock.js   état du stock et mouvements (entrées, pertes, inventaires)
+  routes/reports.js exports CSV (compatibles Excel)
+  stock.js          enregistrement des mouvements de stock
 public/             interface web (HTML/CSS/JS sans framework)
 test/               tests de l'API (node:test)
 ```
 
 Tables de la base : `users`, `sessions`, `settings`, `families`, `products`, `bar_tables`, `orders`,
-`order_items`, `payment_methods`, `payments`. Les statistiques sont calculées à la demande à partir des
+`order_items`, `payment_methods`, `payments`, `stock_movements`. Les nouvelles colonnes sont ajoutées
+automatiquement aux bases existantes au démarrage (aucune perte de données). Les statistiques sont calculées à la demande à partir des
 commandes et paiements enregistrés.
 
 Sécurité : mots de passe hachés (scrypt), session par cookie `HttpOnly` / `SameSite=Strict`,
@@ -101,5 +128,5 @@ npm test
 
 ## Évolutions possibles
 
-Gestion avancée des stocks (entrées, inventaires, alertes), rapports financiers exportables (PDF/Excel),
-impression de tickets, gestion fine des droits, mode hors ligne.
+Fournisseurs et bons de commande, dépenses et charges (résultat net), clôture de caisse avec
+comptage des espèces, gestion fine des droits, mode hors ligne.

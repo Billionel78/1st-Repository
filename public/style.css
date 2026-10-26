@@ -147,6 +147,9 @@ label.check input { width: 22px; min-height: 22px; height: 22px; }
   background: var(--surface); color: var(--text); border: 1px solid var(--border);
   border-radius: 12px; box-shadow: var(--shadow); padding: .4rem; display: grid;
 }
+.user-menu a { display: block; padding: .7rem .8rem; color: inherit; text-decoration: none; border-radius: 8px; white-space: nowrap; }
+.user-menu a:hover { background: var(--surface-2); }
+.export { position: relative; }
 .user-menu button { background: none; border: 0; text-align: left; padding: .7rem .8rem; font: inherit; color: inherit; border-radius: 8px; cursor: pointer; }
 .user-menu button:hover { background: var(--surface-2); }
 .user-menu-role { padding: .5rem .8rem; color: var(--muted); font-size: .85rem; border-bottom: 1px solid var(--border); margin-bottom: .3rem; }
@@ -341,6 +344,25 @@ table.data .right, table.data th.right { text-align: right; }
 
 .spinner { width: 28px; height: 28px; border: 3px solid var(--border); border-top-color: var(--primary); border-radius: 50%; animation: spin .8s linear infinite; margin: 3rem auto; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.banner.banner-warn { background: var(--warning-soft); color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, transparent); }
+
+/* ---------- Ticket de caisse ---------- */
+#ticket { display: none; }
+@media print {
+  body.printing-ticket > *:not(#ticket) { display: none !important; }
+  body.printing-ticket { background: #fff; }
+  body.printing-ticket #ticket {
+    display: block; width: 72mm; margin: 0 auto; color: #000; font: 12px/1.35 "Courier New", monospace;
+  }
+  #ticket hr { border: 0; border-top: 1px dashed #000; margin: 6px 0; }
+  #ticket .t-center { text-align: center; }
+  #ticket .t-strong { font-weight: 700; }
+  #ticket .t-big { font-size: 14px; }
+  #ticket .t-line { display: flex; justify-content: space-between; gap: 8px; }
+  #ticket .t-sub { font-size: 11px; padding-left: 12px; }
+  @page { margin: 4mm; }
+}
 
 @media print {
   .nav, .topbar, .page-head .actions, .filters, .toasts { display: none !important; }

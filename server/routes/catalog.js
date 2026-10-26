@@ -2,6 +2,8 @@
 
 const { badRequest, notFound, conflict, toInt, toText, toBool, toColor } = require('../http');
 const { nowLocal } = require('../time');
+const { transaction } = require('../db');
+const { applyStockMovement } = require('../stock');
 
 const MAX_PRICE = 100_000_000;
 const MAX_STOCK = 1_000_000;
@@ -70,7 +72,8 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
 
   // ================= Produits =================
   const productSelect = `
-    SELECT p.id, p.family_id, f.name AS family_name, p.name, p.price, p.track_stock, p.stock, p.available,
+    SELECT p.id, p.family_id, f.name AS family_name, p.name, p.price, p.cost_price, p.track_stock, p.stock,
+      p.alert_threshold, p.available,
       ${RESERVED_SQL} AS reserved
     FROM products p JOIN families f ON f.id = p.family_id`;
   const getProduct = (id) => db.prepare(`${productSelect} WHERE p.id = ? AND p.archived = 0`).get(id);
@@ -88,6 +91,8 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
       family_id: toInt(body?.family_id, 'famille', { min: 1, optional: partial }),
       name: toText(body?.name, 'nom', { max: 80, optional: partial }),
       price: toInt(body?.price, 'prix', { min: 0, max: MAX_PRICE, optional: partial }),
+      cost_price: toInt(body?.cost_price, "prix d'achat", { min: 0, max: MAX_PRICE, optional: true }),
+      alert_threshold: toInt(body?.alert_threshold, "seuil d'alerte", { min: 0, max: MAX_STOCK, optional: true }),
       track_stock: toBool(body?.track_stock, 'suivi du stock', { optional: true }),
       stock: toInt(body?.stock, 'stock', { min: 0, max: MAX_STOCK, optional: true }),
       available: toBool(body?.available, 'disponible', { optional: true }),
@@ -106,11 +111,23 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
     if (!getFamily(p.family_id)) throw badRequest('Famille introuvable.');
     assertUniqueProductName(p.family_id, p.name);
     const now = nowLocal();
-    const r = db.prepare(`INSERT INTO products (family_id, name, price, track_stock, stock, available, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
-      p.family_id, p.name, p.price, p.track_stock ? 1 : 0, p.stock ?? 0, p.available === false ? 0 : 1, now, now
-    );
-    res.status(201).json(getProduct(r.lastInsertRowid));
+    const id = transaction(db, () => {
+      const r = db.prepare(`INSERT INTO products
+        (family_id, name, price, cost_price, alert_threshold, track_stock, stock, available, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`).run(
+        p.family_id, p.name, p.price, p.cost_price ?? 0, p.alert_threshold ?? 0, p.track_stock ? 1 : 0,
+        p.available === false ? 0 : 1, now, now
+      );
+      const productId = Number(r.lastInsertRowid);
+      if (p.stock) {
+        applyStockMovement(db, {
+          productId, type: 'entree', delta: p.stock, unitCost: p.cost_price ?? null, note: 'Stock initial',
+          userId: req.user.id, at: now,
+        });
+      }
+      return productId;
+    });
+    res.status(201).json(getProduct(id));
   });
 
   app.put('/api/products/:id', requireAdmin, (req, res) => {
@@ -123,16 +140,29 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
       family_id: p.family_id ?? current.family_id,
       name: p.name ?? current.name,
       price: p.price ?? current.price,
+      cost_price: p.cost_price ?? current.cost_price,
+      alert_threshold: p.alert_threshold ?? current.alert_threshold,
       track_stock: p.track_stock === undefined ? current.track_stock : (p.track_stock ? 1 : 0),
       stock: p.stock ?? current.stock,
       available: p.available === undefined ? current.available : (p.available ? 1 : 0),
     };
     assertUniqueProductName(merged.family_id, merged.name, id);
     // Le changement de prix ne modifie pas les commandes déjà saisies (prix figé à la saisie).
-    db.prepare(`UPDATE products SET family_id = ?, name = ?, price = ?, track_stock = ?, stock = ?, available = ?,
-      updated_at = ? WHERE id = ?`).run(
-      merged.family_id, merged.name, merged.price, merged.track_stock, merged.stock, merged.available, nowLocal(), id
-    );
+    transaction(db, () => {
+      const now = nowLocal();
+      db.prepare(`UPDATE products SET family_id = ?, name = ?, price = ?, cost_price = ?, alert_threshold = ?,
+        track_stock = ?, available = ?, updated_at = ? WHERE id = ?`).run(
+        merged.family_id, merged.name, merged.price, merged.cost_price, merged.alert_threshold,
+        merged.track_stock, merged.available, now, id
+      );
+      // Toute correction directe du stock est tracée comme un ajustement.
+      if (merged.stock !== current.stock) {
+        applyStockMovement(db, {
+          productId: id, type: 'ajustement', delta: merged.stock - current.stock,
+          note: 'Correction depuis la fiche produit', userId: req.user.id, at: now,
+        });
+      }
+    });
     res.json(getProduct(id));
   });
 

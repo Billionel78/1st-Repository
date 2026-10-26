@@ -224,7 +224,8 @@ $('#user-btn').addEventListener('click', (e) => {
   e.stopPropagation();
   $('#user-menu').hidden = !$('#user-menu').hidden;
 });
-document.addEventListener('click', () => { $('#user-menu').hidden = true; });
+// Un clic ailleurs ferme les menus déroulants.
+document.addEventListener('click', () => { $$('.user-menu').forEach((m) => { m.hidden = true; }); });
 $('#user-menu').addEventListener('click', async (e) => {
   const action = e.target.dataset.action;
   if (action === 'logout') {
@@ -260,6 +261,7 @@ const NAV = [
   { href: '#/commandes', icon: '🧾', label: 'Commandes', match: /^#\/commande/, badge: 'open-count' },
   { href: '#/historique', icon: '📅', label: 'Historique', match: /^#\/historique/ },
   { href: '#/statistiques', icon: '📊', label: 'Statistiques', match: /^#\/statistiques/, admin: true },
+  { href: '#/stock', icon: '📦', label: 'Stock', match: /^#\/stock/, admin: true, badge: 'stock-alerts' },
   { href: '#/gestion', icon: '⚙️', label: 'Gestion', match: /^#\/gestion/, admin: true },
 ];
 
@@ -274,6 +276,13 @@ function renderNav() {
 function highlightNav() {
   const hash = location.hash || '#/';
   $$('#nav a').forEach((a) => a.classList.toggle('active', new RegExp(a.dataset.match).test(hash)));
+}
+
+function setBadge(id, n) {
+  const el = $(`#${id}`);
+  if (!el) return;
+  el.hidden = !n;
+  el.textContent = n;
 }
 
 function setOpenCount(n) {
@@ -291,6 +300,7 @@ const ROUTES = [
   [/^#\/commande\/(\d+)$/, (m, seq) => renderOrder(Number(m[1]), seq)],
   [/^#\/historique$/, (m, seq) => renderHistory(m, seq)],
   [/^#\/statistiques$/, (m, seq) => renderStats(m, seq), true],
+  [/^#\/stock$/, (m, seq) => renderStock(m, seq), true],
   [/^#\/gestion(?:\/(\w+))?$/, (m, seq) => renderAdmin(m[1] || 'produits', seq), true],
 ];
 
@@ -417,6 +427,7 @@ async function renderHome(m, seq) {
       <div id="home-open"></div>
     </div>
     <div class="section" id="home-top"></div>`;
+  view.querySelector('.section').insertAdjacentHTML('beforebegin', '<div id="home-stock"></div>');
   bindBanner(view);
 
   const paint = (d, orders) => {
@@ -432,6 +443,11 @@ async function renderHome(m, seq) {
     $('#home-open').innerHTML = orders.length
       ? `<div class="orders-grid">${orders.map(orderCard).join('')}</div>`
       : '<div class="empty">Aucune commande en attente. 👍</div>';
+    setBadge('stock-alerts', d.low_stock.length);
+    $('#home-stock').innerHTML = d.low_stock.length ? `<div class="banner banner-warn section">
+      <span>⚠️ <strong>Stock bas :</strong> ${d.low_stock.map((p) => `${esc(p.name)} (${Math.max(p.free, 0)})`).join(', ')}</span>
+      ${isAdmin() ? '<span class="spacer"></span><a class="btn btn-sm" href="#/stock">Gérer le stock</a>' : ''}
+    </div>` : '';
     $('#home-top').innerHTML = d.top_products.length ? `
       <h2>🏆 Produits les plus vendus aujourd’hui</h2>
       <div class="card">${barList(d.top_products, { label: (p) => p.product_name, value: (p) => p.quantity,
@@ -668,8 +684,9 @@ async function renderOrder(id, seq) {
           <button class="btn btn-success btn-lg btn-block" id="pay-btn" ${order.total > 0 ? '' : 'disabled'}>💰 Encaisser ${money(order.remaining)}</button>
           <button class="btn btn-primary btn-block" id="add-btn">＋ Ajouter des articles</button>
           <button class="btn btn-block" id="transfer-btn">🔀 Changer de table</button>
+          <button class="btn btn-block" id="print-btn" ${order.items.length ? '' : 'disabled'}>🖨️ Imprimer l’addition</button>
           ${isAdmin() && order.paid_amount === 0 ? '<button class="btn btn-danger btn-block" id="cancel-btn">Annuler la commande</button>' : ''}
-        </div>` : `<div class="card"><button class="btn btn-block" id="print-btn">🖨️ Imprimer</button></div>`}
+        </div>` : order.status === 'paid' ? '<div class="card"><button class="btn btn-block" id="print-btn">🖨️ Imprimer le reçu</button></div>' : ''}
         <div class="card">
           <h3>Paiements</h3>
           ${order.payments.length ? `<div class="grid" style="margin-top:.7rem">${order.payments.map((p) => `
@@ -699,7 +716,7 @@ async function renderOrder(id, seq) {
     location.hash = '#/';
   });
   $('#transfer-btn', view)?.addEventListener('click', () => openTransferModal(order));
-  $('#print-btn', view)?.addEventListener('click', () => window.print());
+  $('#print-btn', view)?.addEventListener('click', () => printTicket(order));
   $('#cancel-btn', view)?.addEventListener('click', () => formModal({
     title: `Annuler la commande ${order.number}`,
     fields: [{ name: 'reason', label: 'Motif (facultatif)', maxlength: 200 }],
@@ -711,6 +728,45 @@ async function renderOrder(id, seq) {
       route();
     },
   }));
+}
+
+/** Ticket au format caisse (80 mm) : addition si la commande est ouverte, reçu si elle est payée. */
+function printTicket(order) {
+  const paid = order.status === 'paid';
+  const ticket = document.createElement('div');
+  ticket.id = 'ticket';
+  ticket.innerHTML = `
+    <div class="t-center t-strong t-big">${esc(state.settings.bar_name)}</div>
+    <div class="t-center">${paid ? 'REÇU' : 'ADDITION'}</div>
+    <hr>
+    <div>Commande : ${esc(order.number)}</div>
+    <div>Table : ${esc(order.table_name)}</div>
+    <div>Date : ${fmtDateTime(paid ? order.closed_at : nowString())}</div>
+    <hr>
+    ${order.items.map((i) => `<div class="t-line"><span>${i.quantity} × ${esc(i.product_name)}</span><span>${nf.format(i.amount)}</span></div>
+      <div class="t-sub">${nf.format(i.unit_price)} l’unité</div>`).join('')}
+    <hr>
+    <div class="t-line t-strong t-big"><span>TOTAL</span><span>${money(order.total)}</span></div>
+    ${order.payments.map((p) => `<div class="t-line"><span>${esc(p.method_name)}</span><span>${nf.format(p.amount)}</span></div>
+      ${p.change_amount ? `<div class="t-sub">Reçu ${nf.format(p.received_amount)} · rendu ${nf.format(p.change_amount)}</div>` : ''}`).join('')}
+    ${!paid && order.paid_amount ? `<div class="t-line t-strong"><span>RESTE À PAYER</span><span>${money(order.remaining)}</span></div>` : ''}
+    <hr>
+    <div class="t-center">Merci de votre visite !</div>`;
+  document.body.append(ticket);
+  document.body.classList.add('printing-ticket');
+  const cleanup = () => {
+    document.body.classList.remove('printing-ticket');
+    ticket.remove();
+    window.removeEventListener('afterprint', cleanup);
+  };
+  window.addEventListener('afterprint', cleanup);
+  window.print();
+  setTimeout(cleanup, 1000); // navigateurs sans « afterprint »
+}
+
+function nowString() {
+  const d = new Date();
+  return `${isoDate(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 async function openTransferModal(order) {
@@ -923,7 +979,17 @@ async function renderStats(m, seq) {
   view.innerHTML = `
     <div class="page-head">
       <div><h1>Statistiques</h1><div class="muted">${single ? esc(longDate(from)) : `Du ${fmtDate(from)} au ${fmtDate(to)}`}</div></div>
-      <div class="actions"><button class="btn" id="print-stats">🖨️ Imprimer</button></div>
+      <div class="actions">
+        <div class="export">
+          <button class="btn" type="button" id="export-btn" aria-haspopup="menu">⬇️ Exporter (Excel)</button>
+          <div class="user-menu" id="export-menu" role="menu" hidden>
+            <a role="menuitem" href="/api/reports/sales.csv?from=${from}&to=${to}" download>Ventes par produit</a>
+            <a role="menuitem" href="/api/reports/orders.csv?from=${from}&to=${to}" download>Commandes</a>
+            <a role="menuitem" href="/api/reports/payments.csv?from=${from}&to=${to}" download>Encaissements</a>
+          </div>
+        </div>
+        <button class="btn" id="print-stats">🖨️ Imprimer</button>
+      </div>
     </div>
     <div class="filters">
       <div class="seg" role="group" aria-label="Période">
@@ -942,6 +1008,17 @@ async function renderStats(m, seq) {
       ${kpi('Commandes enregistrées', s.orders_created, s.orders_cancelled ? `dont ${s.orders_cancelled} annulée(s)` : '')}
       ${kpi('Commandes payées', s.orders_paid, `Ventes clôturées : ${money(s.sales_amount)}`)}
       ${kpi('Commandes ouvertes (actuellement)', s.open_orders.count, `${money(s.open_orders.remaining)} restant à encaisser`)}
+    </div>
+
+    <div class="section">
+      <h2>📈 Résultat des ventes</h2>
+      <div class="kpis">
+        ${kpi('Ventes clôturées', money(s.sales_amount), 'Commandes payées')}
+        ${kpi('Coût d’achat des produits vendus', money(s.cost_of_sales))}
+        ${kpi('Marge brute', money(s.gross_margin), s.margin_rate === null ? '' : `${String(s.margin_rate).replace('.', ',')} % des ventes`, true)}
+      </div>
+      ${s.items_without_cost ? `<p class="muted small">⚠️ ${s.items_without_cost} article(s) vendu(s) sans prix d’achat renseigné : la marge est surestimée.
+        ${isAdmin() ? 'Renseignez les prix d’achat dans <a href="#/gestion/produits">Gestion → Produits</a>.' : ''}</p>` : ''}
     </div>
 
     <div class="stats-grid section">
@@ -974,14 +1051,19 @@ async function renderStats(m, seq) {
     <div class="section">
       <h2>📦 Produits vendus</h2>
       ${s.products.length ? `<div class="table-wrap"><table class="data">
-        <thead><tr><th>#</th><th>Produit</th><th>Famille</th><th class="right">Quantité vendue</th><th class="right">Montant généré</th></tr></thead>
+        <thead><tr><th>#</th><th>Produit</th><th>Famille</th><th class="right">Quantité vendue</th><th class="right">Montant généré</th>
+          <th class="right">Coût d’achat</th><th class="right">Marge brute</th></tr></thead>
         <tbody>${s.products.map((p, i) => `<tr>
           <td><span class="rank">${i + 1}</span></td><td><strong>${esc(p.product_name)}</strong></td>
           <td class="muted">${esc(p.family_name)}</td><td class="right num">${nf.format(p.quantity)}</td>
-          <td class="right num">${money(p.amount)}</td></tr>`).join('')}</tbody>
+          <td class="right num">${money(p.amount)}</td>
+          <td class="right num">${p.qty_without_cost === p.quantity ? '<span class="muted">—</span>' : money(p.cost)}</td>
+          <td class="right num">${money(p.margin)}</td></tr>`).join('')}</tbody>
         <tfoot><tr><td></td><td colspan="2">Total</td>
           <td class="right num">${nf.format(s.products.reduce((a, p) => a + p.quantity, 0))}</td>
-          <td class="right num">${money(s.products.reduce((a, p) => a + p.amount, 0))}</td></tr></tfoot>
+          <td class="right num">${money(s.sales_amount)}</td>
+          <td class="right num">${money(s.cost_of_sales)}</td>
+          <td class="right num">${money(s.gross_margin)}</td></tr></tfoot>
       </table></div>` : '<div class="empty">Aucun produit vendu sur cette période.</div>'}
     </div>
 
@@ -993,7 +1075,17 @@ async function renderStats(m, seq) {
           <td class="right num">${x.count}</td><td class="right num">${money(x.amount)}</td></tr>`).join('')}</tbody>
         <tfoot><tr><td colspan="2">Total encaissé</td><td class="right num">${s.payments_count}</td><td class="right num">${money(s.collected)}</td></tr></tfoot>
       </table></div>` : '<div class="empty">Aucun encaissement sur cette période.</div>'}
-    </div>`;
+    </div>
+
+    ${s.by_user.length ? `<div class="section">
+      <h2>👤 Encaissements par utilisateur</h2>
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Utilisateur</th><th class="right">Paiements</th><th class="right">dont espèces</th><th class="right">Total encaissé</th></tr></thead>
+        <tbody>${s.by_user.map((u) => `<tr><td><strong>${esc(u.name)}</strong></td><td class="right num">${u.count}</td>
+          <td class="right num">${money(u.cash)}</td><td class="right num">${money(u.amount)}</td></tr>`).join('')}</tbody>
+      </table></div>
+      <p class="muted small">La colonne « dont espèces » indique le montant que chaque personne doit remettre en caisse.</p>
+    </div>` : ''}`;
 
   $$('[data-preset]', view).forEach((b) => b.addEventListener('click', () => { statsState.preset = b.dataset.preset; route(); }));
   const custom = () => {
@@ -1007,6 +1099,152 @@ async function renderStats(m, seq) {
   $('#s-from', view).addEventListener('change', custom);
   $('#s-to', view).addEventListener('change', custom);
   $('#print-stats', view).addEventListener('click', () => window.print());
+  bindDropdown($('#export-btn', view), $('#export-menu', view));
+}
+
+function bindDropdown(button, menu) {
+  button.addEventListener('click', (e) => {
+    e.stopPropagation();
+    menu.hidden = !menu.hidden;
+  });
+}
+
+/* =====================================================================
+ * Stock (responsable)
+ * ===================================================================== */
+const MOVEMENT_TYPES = {
+  entree: ['Entrée', 'badge-paid'],
+  perte: ['Perte', 'badge-cancelled'],
+  inventaire: ['Inventaire', ''],
+  vente: ['Vente', 'badge-open'],
+  ajustement: ['Ajustement', ''],
+};
+const STOCK_STATUS = {
+  ok: ['OK', 'badge-paid'],
+  alerte: ['Stock bas', 'badge-open'],
+  rupture: ['Rupture', 'badge-cancelled'],
+};
+const movementBadge = (t) => `<span class="badge ${MOVEMENT_TYPES[t][1]}">${MOVEMENT_TYPES[t][0]}</span>`;
+const signed = (n) => (n > 0 ? `+${nf.format(n)}` : nf.format(n));
+
+function movementsTable(moves, { showProduct = true } = {}) {
+  if (!moves.length) return '<div class="empty">Aucun mouvement de stock.</div>';
+  return `<div class="table-wrap"><table class="data">
+    <thead><tr><th>Date</th>${showProduct ? '<th>Produit</th>' : ''}<th>Type</th><th class="right">Quantité</th>
+      <th class="right">Stock après</th><th>Détail</th></tr></thead>
+    <tbody>${moves.map((m) => `<tr>
+      <td class="num">${fmtDateTime(m.created_at)}</td>
+      ${showProduct ? `<td><strong>${esc(m.product_name)}</strong></td>` : ''}
+      <td>${movementBadge(m.type)}</td>
+      <td class="right num"><strong>${signed(m.quantity)}</strong></td>
+      <td class="right num">${nf.format(m.stock_after)}</td>
+      <td class="small">${[
+        m.order_number ? `Commande ${esc(m.order_number)}` : '',
+        m.unit_cost ? `Prix d’achat ${money(m.unit_cost)}` : '',
+        m.note ? esc(m.note) : '',
+        m.created_by_name ? `<span class="muted">par ${esc(m.created_by_name)}</span>` : '',
+      ].filter(Boolean).join(' · ')}</td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+async function renderStock(m, seq) {
+  const [items, moves] = await Promise.all([api('GET', '/api/stock'), api('GET', '/api/stock/movements?limit=50')]);
+  if (seq !== renderSeq) return;
+  const alerts = items.filter((p) => p.status !== 'ok');
+  setBadge('stock-alerts', alerts.length);
+  const today = isoDate();
+  const view = $('#view');
+  view.innerHTML = `
+    <div class="page-head">
+      <div><h1>Stock</h1><div class="muted">Entrées, pertes, inventaires et historique des mouvements</div></div>
+      <div class="actions">
+        <a class="btn" href="/api/reports/stock.csv" download>⬇️ État du stock (Excel)</a>
+        <a class="btn" href="/api/reports/stock-movements.csv?from=${addDays(today, -30)}&to=${today}" download>⬇️ Mouvements 30 jours</a>
+      </div>
+    </div>
+    <div class="kpis">
+      ${kpi('Produits suivis', items.length)}
+      ${kpi('Stock bas', items.filter((p) => p.status === 'alerte').length)}
+      ${kpi('En rupture', items.filter((p) => p.status === 'rupture').length)}
+      ${kpi('Valeur du stock (prix d’achat)', money(items.reduce((a, p) => a + p.stock_value, 0)), '', true)}
+    </div>
+    <div class="section">
+      <div class="filters">
+        <label>Rechercher<input type="search" id="stock-search" placeholder="Nom du produit"></label>
+        <label class="check"><input type="checkbox" id="stock-alerts-only"> Seulement les alertes</label>
+      </div>
+      ${items.length ? `<div class="table-wrap"><table class="data" id="stock-table">
+        <thead><tr><th>Produit</th><th class="right">En stock</th><th class="right">Sur commandes ouvertes</th>
+          <th class="right">Disponible</th><th class="right">Seuil</th><th>État</th><th class="right">Actions</th></tr></thead>
+        <tbody>${items.map((p) => `<tr data-name="${esc(p.name.toLowerCase())}" data-status="${p.status}">
+          <td><strong>${esc(p.name)}</strong><br><span class="muted small">${esc(p.family_name)}</span></td>
+          <td class="right num">${nf.format(p.stock)}</td>
+          <td class="right num">${p.reserved ? nf.format(p.reserved) : '<span class="muted">0</span>'}</td>
+          <td class="right num"><strong>${nf.format(p.free)}</strong></td>
+          <td class="right num">${nf.format(p.alert_threshold)}</td>
+          <td><span class="badge ${STOCK_STATUS[p.status][1]}">${STOCK_STATUS[p.status][0]}</span></td>
+          <td class="right"><div class="row" style="justify-content:flex-end">
+            <button class="btn btn-sm" data-move="entree" data-id="${p.id}">＋ Entrée</button>
+            <button class="btn btn-sm" data-move="perte" data-id="${p.id}">− Perte</button>
+            <button class="btn btn-sm" data-move="inventaire" data-id="${p.id}">Inventaire</button>
+            <button class="btn btn-sm btn-ghost" data-history="${p.id}">Historique</button>
+          </div></td>
+        </tr>`).join('')}</tbody></table></div>`
+      : `<div class="empty">Aucun produit avec suivi du stock.<br>Activez « Suivi du stock » sur les produits dans
+          <a href="#/gestion/produits">Gestion → Produits</a>.</div>`}
+    </div>
+    <div class="section">
+      <h2>🕘 Derniers mouvements</h2>
+      ${movementsTable(moves)}
+    </div>`;
+
+  const filter = () => {
+    const q = $('#stock-search', view).value.trim().toLowerCase();
+    const onlyAlerts = $('#stock-alerts-only', view).checked;
+    $$('#stock-table tbody tr', view).forEach((tr) => {
+      tr.hidden = (q && !tr.dataset.name.includes(q)) || (onlyAlerts && tr.dataset.status === 'ok');
+    });
+  };
+  $('#stock-search', view).addEventListener('input', filter);
+  $('#stock-alerts-only', view).addEventListener('change', filter);
+
+  $$('[data-move]', view).forEach((b) => b.addEventListener('click', () => {
+    const p = items.find((x) => x.id === Number(b.dataset.id));
+    const type = b.dataset.move;
+    const fields = {
+      entree: [
+        { name: 'quantity', label: 'Quantité reçue', type: 'number', min: 1, required: true },
+        { name: 'unit_cost', label: `Prix d’achat unitaire (${state.settings.currency})`, type: 'number', min: 0, value: p.cost_price || '', hint: 'Facultatif. Met à jour le prix d’achat du produit.' },
+        { name: 'note', label: 'Note (fournisseur, n° de bon…)', maxlength: 200 },
+      ],
+      perte: [
+        { name: 'quantity', label: 'Quantité perdue', type: 'number', min: 1, required: true },
+        { name: 'note', label: 'Motif (casse, offert, périmé…)', maxlength: 200 },
+      ],
+      inventaire: [
+        { name: 'quantity', label: 'Quantité réellement comptée', type: 'number', min: 0, required: true, value: p.stock,
+          hint: `Stock enregistré : ${p.stock}. L’écart sera enregistré comme mouvement d’inventaire.` },
+        { name: 'note', label: 'Note', maxlength: 200 },
+      ],
+    }[type];
+    const titles = { entree: 'Entrée de stock', perte: 'Déclarer une perte', inventaire: 'Inventaire' };
+    formModal({
+      title: `${titles[type]} · ${p.name}`,
+      fields,
+      onSubmit: async (v) => {
+        const r = await api('POST', '/api/stock/movements', { product_id: p.id, type, ...v, note: v.note || undefined });
+        toast(r.delta === 0 ? 'Aucun écart : stock inchangé.' : `Stock de « ${p.name} » : ${nf.format(r.stock)} (${signed(r.delta)}).`, 'ok');
+        route();
+      },
+    });
+  }));
+  $$('[data-history]', view).forEach((b) => b.addEventListener('click', async () => {
+    const p = items.find((x) => x.id === Number(b.dataset.history));
+    try {
+      const list = await api('GET', `/api/stock/movements?product_id=${p.id}&limit=200`);
+      openModal({ title: `Historique du stock · ${esc(p.name)}`, wide: true, body: movementsTable(list, { showProduct: false }) });
+    } catch (err) { toast(err.message, 'err'); }
+  }));
 }
 
 /* =====================================================================
@@ -1066,11 +1304,12 @@ async function adminProducts(body, seq) {
       <button class="btn btn-primary" data-act="add" ${families.length ? '' : 'disabled'}>＋ Nouveau produit</button>
     </div>
     ${list.length ? `<div class="table-wrap"><table class="data">
-      <thead><tr><th>Produit</th><th>Famille</th><th class="right">Prix</th><th class="right">Stock</th><th>Disponibilité</th><th class="right">Actions</th></tr></thead>
+      <thead><tr><th>Produit</th><th>Famille</th><th class="right">Prix de vente</th><th class="right">Prix d’achat</th><th class="right">Stock</th><th>Disponibilité</th><th class="right">Actions</th></tr></thead>
       <tbody>${list.map((p) => `<tr>
         <td><strong>${esc(p.name)}</strong></td>
         <td>${esc(p.family_name)}</td>
         <td class="right num">${money(p.price)}</td>
+        <td class="right num">${p.cost_price ? money(p.cost_price) : '<span class="muted">—</span>'}</td>
         <td class="right num">${p.track_stock ? `${p.stock}${p.reserved ? ` <span class="muted small">(${p.reserved} réservé)</span>` : ''}` : '<span class="muted">Non suivi</span>'}</td>
         <td><button class="btn btn-sm" data-act="toggle" data-id="${p.id}">${p.available ? '✅ Disponible' : '⛔ Indisponible'}</button></td>
         <td class="right"><div class="row" style="justify-content:flex-end">
@@ -1087,12 +1326,16 @@ async function adminProducts(body, seq) {
       { name: 'name', label: 'Nom du produit', required: true, value: p?.name, maxlength: 80 },
       { name: 'family_id', label: 'Famille', type: 'select', options: familyOptions, value: p?.family_id ?? (productFilter.family || families[0]?.id) },
       { name: 'price', label: `Prix de vente unitaire (${state.settings.currency})`, type: 'number', min: 0, required: true, value: p?.price },
+      { name: 'cost_price', label: `Prix d’achat unitaire (${state.settings.currency})`, type: 'number', min: 0, value: p?.cost_price ?? 0, hint: 'Sert au calcul de la marge brute dans les statistiques.' },
       { name: 'available', label: 'Disponible à la vente', type: 'checkbox', value: p ? !!p.available : true },
       { name: 'track_stock', label: 'Activer le suivi du stock', type: 'checkbox', value: !!p?.track_stock },
-      { name: 'stock', label: 'Quantité en stock', type: 'number', min: 0, value: p?.stock ?? 0, hint: 'Utilisé uniquement si le suivi du stock est activé. Le stock diminue automatiquement à chaque commande payée.' },
+      ...(p ? [] : [{ name: 'stock', label: 'Stock initial', type: 'number', min: 0, value: 0, hint: 'Ensuite, utilisez l’écran Stock pour les entrées, pertes et inventaires.' }]),
+      { name: 'alert_threshold', label: 'Seuil d’alerte de stock bas', type: 'number', min: 0, value: p?.alert_threshold ?? 0, hint: 'Une alerte s’affiche quand le stock disponible atteint ce niveau.' },
     ],
     onSubmit: async (v) => {
-      const payload = { ...v, family_id: Number(v.family_id), stock: v.stock ?? 0 };
+      const payload = { ...v, family_id: Number(v.family_id) };
+      if (!p) payload.stock = v.stock ?? 0;
+      for (const k of ['cost_price', 'alert_threshold']) if (payload[k] === undefined) payload[k] = 0;
       if (p) await api('PUT', `/api/products/${p.id}`, payload);
       else await api('POST', '/api/products', payload);
       toast(p ? 'Produit modifié.' : 'Produit ajouté.', 'ok');

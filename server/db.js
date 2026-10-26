@@ -117,7 +117,37 @@ CREATE TABLE IF NOT EXISTS payments (
 );
 CREATE INDEX IF NOT EXISTS idx_payments_order ON payments(order_id);
 CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at);
+
+-- Mouvements de stock : entrées, pertes, inventaires, ventes, ajustements.
+CREATE TABLE IF NOT EXISTS stock_movements (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id  INTEGER NOT NULL REFERENCES products(id),
+  type        TEXT NOT NULL CHECK (type IN ('entree', 'perte', 'inventaire', 'vente', 'ajustement')),
+  quantity    INTEGER NOT NULL,
+  stock_after INTEGER NOT NULL,
+  unit_cost   INTEGER,
+  note        TEXT,
+  order_id    INTEGER REFERENCES orders(id),
+  created_by  INTEGER REFERENCES users(id),
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_movements_product ON stock_movements(product_id);
+CREATE INDEX IF NOT EXISTS idx_movements_created ON stock_movements(created_at);
 `;
+
+// Colonnes ajoutées après la première version : ajoutées automatiquement aux bases existantes.
+const MIGRATIONS = [
+  ['products', 'cost_price', 'INTEGER NOT NULL DEFAULT 0'],
+  ['products', 'alert_threshold', 'INTEGER NOT NULL DEFAULT 0'],
+  ['order_items', 'unit_cost', 'INTEGER NOT NULL DEFAULT 0'],
+];
+
+function migrate(db) {
+  for (const [table, column, definition] of MIGRATIONS) {
+    const exists = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+    if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
 
 const DEFAULT_FAMILIES = [
   { name: 'Bières', color: '#d97706', icon: '🍺', products: [['Vox 66', 1000], ['Castle Beer', 1000], ['Flag', 800], ['Guinness', 1200]] },
@@ -141,6 +171,7 @@ function openDatabase(file) {
   db.exec('PRAGMA foreign_keys = ON;');
   if (file !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
 }
 
