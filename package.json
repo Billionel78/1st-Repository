@@ -1,0 +1,19 @@
+{
+  "name": "ice-manager",
+  "version": "1.0.0",
+  "description": "ICE MANAGER – application de gestion de bar (commandes, tables, paiements, statistiques)",
+  "main": "server/index.js",
+  "private": true,
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.js\""
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

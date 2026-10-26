@@ -1,0 +1,206 @@
+'use strict';
+
+const { test, before, after } = require('node:test');
+const assert = require('node:assert/strict');
+const { openDatabase, seed } = require('../server/db');
+const { createApp } = require('../server/app');
+const { todayLocal } = require('../server/time');
+
+let server;
+let baseUrl;
+
+function client() {
+  let cookie = '';
+  return async function call(method, url, body) {
+    const res = await fetch(baseUrl + url, {
+      method,
+      headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const setCookie = res.headers.get('set-cookie');
+    if (setCookie) cookie = setCookie.split(';')[0];
+    const data = await res.json();
+    return { status: res.status, data };
+  };
+}
+
+const admin = client();
+const waiter = client();
+
+before(async () => {
+  const db = openDatabase(':memory:');
+  seed(db, { adminPassword: 'secret123' });
+  server = createApp(db).listen(0);
+  await new Promise((r) => server.once('listening', r));
+  baseUrl = `http://127.0.0.1:${server.address().port}`;
+});
+
+after(() => server.close());
+
+const product = async (name) => (await admin('GET', '/api/products')).data.find((p) => p.name === name);
+const table = async (name) => (await admin('GET', '/api/tables')).data.find((t) => t.name === name);
+
+test('refuse les accès sans connexion et les mauvais identifiants', async () => {
+  assert.equal((await admin('GET', '/api/families')).status, 401);
+  assert.equal((await admin('POST', '/api/auth/login', { username: 'admin', password: 'nope' })).status, 401);
+  const ok = await admin('POST', '/api/auth/login', { username: 'admin', password: 'secret123' });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.data.user.role, 'admin');
+});
+
+test('le responsable crée un serveur, qui ne peut pas gérer le catalogue', async () => {
+  const created = await admin('POST', '/api/users', {
+    username: 'awa', full_name: 'Awa', role: 'serveur', password: 'serveur1',
+  });
+  assert.equal(created.status, 201);
+  assert.equal((await waiter('POST', '/api/auth/login', { username: 'awa', password: 'serveur1' })).status, 200);
+  assert.equal((await waiter('POST', '/api/families', { name: 'X' })).status, 403);
+  assert.equal((await waiter('GET', '/api/stats')).status, 403);
+  assert.equal((await waiter('GET', '/api/families')).status, 200);
+});
+
+test('gestion des familles et produits', async () => {
+  const fam = await admin('POST', '/api/families', { name: 'Cocktails', color: '#123456', icon: '🍸' });
+  assert.equal(fam.status, 201);
+  assert.equal((await admin('POST', '/api/families', { name: 'cocktails' })).status, 409);
+  const p = await admin('POST', '/api/products', { family_id: fam.data.id, name: 'Mojito', price: 2500 });
+  assert.equal(p.status, 201);
+  assert.equal(p.data.price, 2500);
+  assert.equal((await admin('POST', '/api/products', { family_id: fam.data.id, name: 'Bad', price: 12.5 })).status, 400);
+  assert.equal((await admin('DELETE', `/api/families/${fam.data.id}`)).status, 409);
+  const upd = await admin('PUT', `/api/products/${p.data.id}`, { price: 3000 });
+  assert.equal(upd.data.price, 3000);
+  const list = await admin('GET', `/api/products?family_id=${fam.data.id}`);
+  assert.deepEqual(list.data.map((x) => x.name), ['Mojito']);
+});
+
+test('cycle complet : commande, ajout, paiement partiel puis total, statistiques', async () => {
+  const castle = await product('Castle Beer');
+  const vox = await product('Vox 66');
+  const t2 = await table('Table 2');
+
+  // Étapes 1 à 5 : Castle Beer x5 sur la Table 2.
+  const first = await waiter('POST', '/api/orders', { table_id: t2.id, product_id: castle.id, quantity: 5 });
+  assert.equal(first.status, 201);
+  assert.equal(first.data.created, true);
+  const order = first.data.order;
+  assert.equal(order.status, 'open');
+  assert.equal(order.total, 5 * castle.price);
+  assert.match(order.number, /^CMD-\d{8}-0001$/);
+
+  // Nouvelle commande sur la même table : ajoutée à la commande ouverte.
+  const second = await waiter('POST', '/api/orders', {
+    table_id: t2.id, items: [{ product_id: castle.id, quantity: 2 }, { product_id: vox.id, quantity: 3 }],
+  });
+  assert.equal(second.status, 200);
+  assert.equal(second.data.order.id, order.id);
+  const castleLine = second.data.order.items.find((i) => i.product_id === castle.id);
+  assert.equal(castleLine.quantity, 7);
+  const total = 7 * castle.price + 3 * vox.price;
+  assert.equal(second.data.order.total, total);
+
+  // La table apparaît occupée.
+  assert.equal((await table('Table 2')).order_id, order.id);
+
+  // Paiement partiel en Mobile Money.
+  const methods = (await waiter('GET', '/api/payment-methods')).data;
+  const cash = methods.find((m) => m.type === 'cash');
+  const orange = methods.find((m) => m.name === 'Orange Money');
+  const p1 = await waiter('POST', `/api/orders/${order.id}/payments`, { method_id: orange.id, amount: 3000, reference: 'OM123' });
+  assert.equal(p1.status, 201);
+  assert.equal(p1.data.fully_paid, false);
+  assert.equal(p1.data.order.status, 'open');
+  assert.equal(p1.data.order.remaining, total - 3000);
+
+  // Pas encore comptée comme vente : aucun produit vendu.
+  let stats = (await admin('GET', '/api/stats')).data;
+  assert.equal(stats.orders_paid, 0);
+  assert.equal(stats.products.length, 0);
+  assert.equal(stats.collected, 3000);
+
+  // On ne peut pas payer plus que le reste.
+  assert.equal((await waiter('POST', `/api/orders/${order.id}/payments`, { method_id: cash.id, amount: total })).status, 400);
+  // Le montant reçu en espèces doit couvrir le montant.
+  assert.equal((await waiter('POST', `/api/orders/${order.id}/payments`, {
+    method_id: cash.id, received_amount: 100,
+  })).status, 400);
+
+  // Solde en espèces avec rendu de monnaie.
+  const remaining = total - 3000;
+  const p2 = await waiter('POST', `/api/orders/${order.id}/payments`, { method_id: cash.id, received_amount: remaining + 500 });
+  assert.equal(p2.data.fully_paid, true);
+  assert.equal(p2.data.change, 500);
+  assert.equal(p2.data.order.status, 'paid');
+  assert.ok(p2.data.order.closed_at);
+
+  // Commande clôturée : plus de modification possible, table libérée.
+  assert.equal((await waiter('POST', `/api/orders/${order.id}/items`, { product_id: vox.id, quantity: 1 })).status, 409);
+  assert.equal((await table('Table 2')).order_id, null);
+
+  stats = (await admin('GET', `/api/stats?date=${todayLocal()}`)).data;
+  assert.equal(stats.collected, total);
+  assert.equal(stats.by_type.cash, remaining);
+  assert.equal(stats.by_type.mobile_money, 3000);
+  assert.equal(stats.orders_paid, 1);
+  assert.equal(stats.sales_amount, total);
+  assert.deepEqual(stats.top_products.map((p) => [p.product_name, p.quantity]), [['Castle Beer', 7], ['Vox 66', 3]]);
+
+  const history = (await waiter('GET', `/api/orders?date=${todayLocal()}`)).data;
+  assert.equal(history[0].id, order.id);
+  assert.equal(history[0].payment_methods.length, 2);
+});
+
+test('suivi du stock : réservation, blocage et déduction au paiement', async () => {
+  const fanta = await product('Fanta');
+  await admin('PUT', `/api/products/${fanta.id}`, { track_stock: true, stock: 4 });
+  const t3 = await table('Table 3');
+  const t4 = await table('Table 4');
+  const o = await waiter('POST', '/api/orders', { table_id: t3.id, product_id: fanta.id, quantity: 3 });
+  assert.equal(o.status, 201);
+  const refused = await waiter('POST', '/api/orders', { table_id: t4.id, product_id: fanta.id, quantity: 2 });
+  assert.equal(refused.status, 409);
+  assert.match(refused.data.error, /Stock insuffisant/);
+  // L'échec ne doit pas laisser de commande vide sur la table 4.
+  assert.equal((await table('Table 4')).order_id, null);
+
+  const cash = (await waiter('GET', '/api/payment-methods')).data.find((m) => m.type === 'cash');
+  await waiter('POST', `/api/orders/${o.data.order.id}/payments`, { method_id: cash.id });
+  const after = await product('Fanta');
+  assert.equal(after.stock, 1);
+  assert.equal(after.reserved, 0);
+});
+
+test('corrections, transfert et annulation', async () => {
+  const flag = await product('Flag');
+  const t5 = await table('Table 5');
+  const t6 = await table('Table 6');
+  const { data } = await waiter('POST', '/api/orders', { table_id: t5.id, product_id: flag.id, quantity: 4 });
+  const order = data.order;
+  const item = order.items[0];
+  const fixed = await waiter('PATCH', `/api/orders/${order.id}/items/${item.id}`, { quantity: 2 });
+  assert.equal(fixed.data.total, 2 * flag.price);
+
+  const moved = await waiter('POST', `/api/orders/${order.id}/transfer`, { table_id: t6.id });
+  assert.equal(moved.data.table_name, 'Table 6');
+
+  assert.equal((await waiter('POST', `/api/orders/${order.id}/cancel`, {})).status, 403);
+  const cancelled = await admin('POST', `/api/orders/${order.id}/cancel`, { reason: 'Erreur de saisie' });
+  assert.equal(cancelled.data.status, 'cancelled');
+  assert.equal((await table('Table 6')).order_id, null);
+});
+
+test('le changement de prix ne modifie pas une commande existante', async () => {
+  const guinness = await product('Guinness');
+  const t7 = await table('Table 7');
+  const { data } = await waiter('POST', '/api/orders', { table_id: t7.id, product_id: guinness.id, quantity: 1 });
+  await admin('PUT', `/api/products/${guinness.id}`, { price: guinness.price + 300 });
+  const again = await waiter('POST', `/api/orders/${data.order.id}/items`, { product_id: guinness.id, quantity: 1 });
+  assert.equal(again.data.items.length, 2);
+  assert.equal(again.data.total, guinness.price * 2 + 300);
+});
+
+test('il reste toujours au moins un responsable actif', async () => {
+  const me = (await admin('GET', '/api/auth/me')).data.user;
+  const res = await admin('PUT', `/api/users/${me.id}`, { role: 'serveur' });
+  assert.equal(res.status, 409);
+});
