@@ -146,7 +146,7 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
     const p = productInput(req.body, false);
     if (!(await getFamily(p.family_id))) throw badRequest('Famille introuvable.');
     await assertUniqueProductName(p.family_id, p.name);
-    const now = nowLocal();
+    const now = req.now;
     const id = await db.transaction(async (tx) => {
       const r = await tx.run(`INSERT INTO products
         (family_id, name, format, image_url, price, cost_price, alert_threshold, track_stock, stock, available,
@@ -187,7 +187,7 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
         available: p.available === undefined ? current.available : (p.available ? 1 : 0),
       };
       await assertUniqueProductName(merged.family_id, merged.name, id, tx);
-      const now = nowLocal();
+      const now = req.now;
       await tx.run(`UPDATE products SET family_id = ?, name = ?, format = ?, image_url = ?, price = ?, cost_price = ?,
         alert_threshold = ?, track_stock = ?, available = ?, updated_at = ? WHERE id = ?`,
         merged.family_id, merged.name, merged.format, merged.image_url, merged.price, merged.cost_price,

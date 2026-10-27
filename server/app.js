@@ -4,7 +4,7 @@ const path = require('node:path');
 const express = require('express');
 const { HttpError, badRequest, toText } = require('./http');
 const { hashPassword, verifyPassword, newToken, createLoginLimiter } = require('./security');
-const { nowLocal } = require('./time');
+const { nowLocal, todayLocal, isIsoDate } = require('./time');
 const { seed, hasUsers } = require('./db');
 const catalogRoutes = require('./routes/catalog');
 const orderRoutes = require('./routes/orders');
@@ -123,6 +123,24 @@ function createApp(db, { secureCookies = false, trustProxy = 'loopback' } = {}) 
   // Toutes les routes suivantes exigent une session valide.
   app.use('/api', (req, res, next) => {
     if (!req.user) return next(new HttpError(401, 'Veuillez vous connecter.'));
+    next();
+  });
+
+  // Date de saisie : maintenant, ou une journée passée en mode rattrapage (responsable uniquement).
+  // L'en-tête X-Ice-Date porte la date (AAAA-MM-JJ) ; l'heure reste l'heure réelle, pour garder l'ordre des saisies.
+  app.use('/api', (req, res, next) => {
+    req.now = nowLocal();
+    req.today = todayLocal();
+    const date = req.headers['x-ice-date'];
+    if (date && req.user.role === 'admin') {
+      const oldest = todayLocal(new Date(Date.now() - 366 * 86_400_000));
+      if (!isIsoDate(date) || date >= req.today || date < oldest) {
+        return next(badRequest('Date de rattrapage invalide : choisissez une journée passée (un an maximum).'));
+      }
+      req.backdate = date;
+      req.now = `${date} ${req.now.slice(11)}`;
+      req.today = date;
+    }
     next();
   });
 

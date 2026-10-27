@@ -14,10 +14,10 @@ for (const backend of BACKENDS) describe(backend.name, () => {
 
   function client() {
     let cookie = '';
-    return async function call(method, url, body) {
+    return async function call(method, url, body, headers = {}) {
       const res = await fetch(baseUrl + url, {
         method,
-        headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
+        headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}), ...headers },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
       const setCookie = res.headers.get('set-cookie');
@@ -245,5 +245,56 @@ for (const backend of BACKENDS) describe(backend.name, () => {
     await admin('PUT', `/api/products/${b.id}`, { image_url: null });
     assert.equal((await admin('GET', up.data.url)).status, 404);
     assert.equal((await admin('GET', up2.url)).status, 200);
+  });
+
+  test('rattrapage : ventes enregistrées à une date passée', async () => {
+    const day = (offset) => {
+      const d = new Date();
+      d.setDate(d.getDate() + offset);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    const past = day(-3);
+    const back = { 'X-Ice-Date': past };
+    const vox = await product('Vox 66');
+    const t1 = await table('Table 1');
+    const t8 = await table('Table 8');
+    const cash = (await admin('GET', '/api/payment-methods')).data.find((m) => m.type === 'cash');
+
+    // Garde-fous : date future ou du jour refusée ; un serveur ne peut pas antidater.
+    assert.equal((await admin('GET', '/api/dashboard', undefined, { 'X-Ice-Date': day(1) })).status, 400);
+    assert.equal((await admin('GET', '/api/dashboard', undefined, { 'X-Ice-Date': day(0) })).status, 400);
+    const w = await waiter('POST', '/api/orders', { table_id: t8.id, product_id: vox.id, quantity: 1 }, back);
+    assert.equal(w.status, 201);
+    assert.equal(w.data.order.created_at.slice(0, 10), day(0)); // ignoré pour un serveur : date du jour
+    await admin('POST', `/api/orders/${w.data.order.id}/cancel`, {});
+
+    // Une commande d'aujourd'hui sur la table 1 ; le rattrapage ne doit pas s'y mêler.
+    const today = await admin('POST', '/api/orders', { table_id: t1.id, product_id: vox.id, quantity: 1 });
+    assert.equal((await admin('POST', '/api/orders', { table_id: t1.id, product_id: vox.id, quantity: 2 }, back)).status, 409);
+    assert.equal((await admin('POST', `/api/orders/${today.data.order.id}/payments`, { method_id: cash.id }, back)).status, 409);
+
+    // Vente passée complète : commande + ajout + paiement, tout au jour rattrapé.
+    const o = await admin('POST', '/api/orders', { table_id: t8.id, product_id: vox.id, quantity: 4 }, back);
+    assert.equal(o.status, 201);
+    assert.equal(o.data.order.created_at.slice(0, 10), past);
+    assert.match(o.data.order.number, new RegExp(`^CMD-${past.replaceAll('-', '')}-\\d{4}$`));
+    await admin('POST', '/api/orders', { table_id: t8.id, product_id: vox.id, quantity: 1 }, back);
+    const paid = await admin('POST', `/api/orders/${o.data.order.id}/payments`, { method_id: cash.id }, back);
+    assert.equal(paid.data.order.status, 'paid');
+    assert.equal(paid.data.order.closed_at.slice(0, 10), past);
+    assert.equal(paid.data.order.payments[0].created_at.slice(0, 10), past);
+
+    const stats = (await admin('GET', `/api/stats?date=${past}`)).data;
+    assert.equal(stats.orders_paid, 1);
+    assert.equal(stats.collected, 5 * vox.price);
+    assert.deepEqual(stats.products.map((x) => [x.product_name, x.quantity]), [['Vox 66', 5]]);
+    const dash = (await admin('GET', '/api/dashboard', undefined, back)).data;
+    assert.equal(dash.date, past);
+    assert.equal(dash.collected, 5 * vox.price);
+    const history = (await admin('GET', `/api/orders?date=${past}`)).data;
+    assert.deepEqual(history.map((x) => x.id), [o.data.order.id]);
+    // Aujourd'hui n'est pas touché.
+    assert.ok(!(await admin('GET', '/api/orders?status=paid')).data.some((x) => x.id === o.data.order.id && x.closed_at.startsWith(day(0))));
+    await admin('POST', `/api/orders/${today.data.order.id}/cancel`, {});
   });
 });

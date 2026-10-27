@@ -52,6 +52,7 @@ module.exports = function stockRoutes(app, db, { requireAdmin }) {
       if (type === 'inventaire' && delta === 0) return { stock: p.stock, delta: 0 };
       const stock = await applyStockMovement(tx, {
         productId, type, delta, unitCost: type === 'entree' ? (unitCost ?? null) : null, note, userId: req.user.id,
+        at: req.now,
       });
       // Une entrée avec un nouveau prix d'achat met à jour le prix d'achat du produit.
       if (type === 'entree' && unitCost !== undefined) {

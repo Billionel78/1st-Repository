@@ -106,7 +106,7 @@ function parseRange(query) {
 module.exports = function statsRoutes(app, db, { requireAdmin }) {
   // Résumé du jour pour le tableau de bord (accessible à tout le personnel).
   app.get('/api/dashboard', async (req, res) => {
-    const today = todayLocal();
+    const today = req.today; // la journée rattrapée, en mode rattrapage
     const s = await computeStats(db, today, today);
     res.json({
       date: today,

@@ -210,11 +210,22 @@ label.check input { width: 22px; min-height: 22px; height: 22px; }
 
 .view { padding: 20px 16px 96px; max-width: 1400px; outline: none; }
 
+/* Bandeau du mode rattrapage : toujours visible sous la barre du haut. */
+.backdate-banner {
+  position: sticky; top: var(--top-h); z-index: 18; display: flex; align-items: center; justify-content: space-between;
+  gap: .6rem 1rem; flex-wrap: wrap; padding: .6rem 16px; background: var(--warning-soft); color: var(--warning);
+  border-bottom: 2px solid var(--warning); font-size: .95rem;
+}
+.backdate-banner strong { color: inherit; }
+.backdate-actions { display: flex; gap: .5rem; flex-wrap: wrap; }
+body.backdating .topbar { box-shadow: inset 0 -3px 0 var(--warning); }
+
 @media (min-width: 900px) {
   .nav { top: var(--top-h); left: 0; bottom: 0; width: var(--nav-w); flex-direction: column; gap: .25rem; padding: 1rem .75rem; border-right: 1px solid var(--border); }
   .nav a { padding: .8rem .9rem; }
   .nav a:hover:not(.active) { background: var(--surface-2); }
   .view { margin-left: var(--nav-w); padding: 24px 28px 40px; }
+  .backdate-banner { margin-left: var(--nav-w); padding-inline: 28px; }
 }
 @media (max-width: 899px) {
   .nav { left: 0; right: 0; bottom: 0; border-top: 1px solid var(--border); justify-content: space-around; padding: .3rem .25rem calc(.3rem + env(safe-area-inset-bottom)); }

@@ -1,7 +1,7 @@
 'use strict';
 
 const { badRequest, notFound, conflict, toInt, toText } = require('../http');
-const { nowLocal, isIsoDate } = require('../time');
+const { isIsoDate } = require('../time');
 const { applyStockMovement } = require('../stock');
 
 const MAX_QTY = 1000;
@@ -35,6 +35,13 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
 
   function requireOpen(order) {
     if (order.status !== 'open') throw conflict('Cette commande est déjà clôturée.');
+  }
+
+  /** Rattrapage : on n'encaisse ni ne complète une commande d'une autre journée que celle rattrapée. */
+  function requireSameDay(req, order) {
+    if (req.backdate && order.created_at.slice(0, 10) !== req.backdate) {
+      throw conflict(`Cette commande date du ${order.created_at.slice(8, 10)}/${order.created_at.slice(5, 7)} : quittez le mode rattrapage (ou choisissez sa date) pour la traiter.`);
+    }
   }
 
   app.get('/api/orders', async (req, res) => {
@@ -155,8 +162,12 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
     const { orderId, created } = await db.transaction(async (tx) => {
       const table = await tx.get('SELECT * FROM bar_tables WHERE id = ? AND archived = 0', tableId);
       if (!table) throw badRequest('Table introuvable.');
-      const now = nowLocal();
-      const open = await tx.get("SELECT id FROM orders WHERE table_id = ? AND status = 'open'", tableId);
+      const now = req.now;
+      const open = await tx.get("SELECT id, created_at FROM orders WHERE table_id = ? AND status = 'open'", tableId);
+      // Rattrapage : ne jamais mêler une vente passée à la commande en cours d'une autre journée.
+      if (open && req.backdate && open.created_at.slice(0, 10) !== req.backdate) {
+        throw conflict(`${table.name} a une commande en cours d'une autre journée : choisissez une autre table pour le rattrapage.`);
+      }
       let id = open?.id;
       if (!id) {
         const r = await tx.run(`INSERT INTO orders (number, table_id, table_name, status, created_by, created_at, updated_at)
@@ -173,8 +184,10 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
     const id = toInt(req.params.id, 'id');
     const items = parseItems(req.body);
     await db.transaction(async (tx) => {
-      requireOpen(await requireOrder(id, tx));
-      await addItems(tx, id, items, nowLocal());
+      const order = await requireOrder(id, tx);
+      requireOpen(order);
+      requireSameDay(req, order);
+      await addItems(tx, id, items, req.now);
     });
     res.json(await loadOrder(id));
   });
@@ -204,7 +217,7 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
       if (newTotal < order.paid_amount) {
         throw conflict('Impossible : le total deviendrait inférieur au montant déjà payé.');
       }
-      const now = nowLocal();
+      const now = req.now;
       if (quantity === 0) await tx.run('DELETE FROM order_items WHERE id = ?', itemId);
       else await tx.run('UPDATE order_items SET quantity = ?, updated_at = ? WHERE id = ?', quantity, now, itemId);
       await recomputeTotal(tx, id, now);
@@ -225,7 +238,7 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
       const busy = await tx.get("SELECT id FROM orders WHERE table_id = ? AND status = 'open'", tableId);
       if (busy) throw conflict(`${table.name} a déjà une commande ouverte.`);
       await tx.run('UPDATE orders SET table_id = ?, table_name = ?, updated_at = ? WHERE id = ?',
-        table.id, table.name, nowLocal(), id);
+        table.id, table.name, req.now, id);
     });
     res.json(await loadOrder(id));
   });
@@ -237,7 +250,8 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
       const order = await requireOrder(id, tx);
       requireOpen(order);
       if (order.paid_amount > 0) throw conflict('Impossible d’annuler une commande partiellement payée.');
-      const now = nowLocal();
+      requireSameDay(req, order);
+      const now = req.now;
       await tx.run("UPDATE orders SET status = 'cancelled', cancel_reason = ?, closed_at = ?, updated_at = ? WHERE id = ?",
         reason, now, now, id);
     });
@@ -269,7 +283,8 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
         change = received - amount;
       }
 
-      const now = nowLocal();
+      requireSameDay(req, order);
+      const now = req.now;
       await tx.run(`INSERT INTO payments
         (order_id, method_id, method_name, method_type, amount, received_amount, change_amount, reference, created_by, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

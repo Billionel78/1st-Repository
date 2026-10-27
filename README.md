@@ -97,6 +97,15 @@ annulation (responsable, si aucun paiement), vue des tables libres/occupées, hi
 statistiques par jour ou par période (aujourd'hui, hier, 7 jours, mois, dates libres), impression
 de l'**addition** (commande ouverte) ou du **reçu** (commande payée) au format ticket de caisse 80 mm.
 
+### Rattrapage de ventes passées (responsable)
+
+Menu du responsable (ou page Historique) → **« Saisir des ventes passées »** : on choisit une journée
+passée (un an maximum) et un bandeau jaune reste affiché. Les ventes se saisissent comme d'habitude ;
+commandes, numéros (`CMD-AAAAMMJJ-…`), paiements et sorties de stock sont enregistrés à cette date
+(l'heure réelle est conservée pour garder l'ordre des saisies). Une vente de rattrapage ne se mélange
+jamais à une commande en cours d'une autre journée. **« Terminer le rattrapage »** revient à la date du jour.
+Côté API : en-tête `X-Ice-Date: AAAA-MM-JJ`, accepté uniquement pour un responsable.
+
 ### Gestion des stocks (écran « Stock », responsable)
 
 Le suivi du stock s'active produit par produit (Gestion → Produits → « Activer le suivi du stock »).

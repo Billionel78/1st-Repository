@@ -8,6 +8,7 @@ const state = {
   user: null,
   settings: { bar_name: 'ICE MANAGER', currency: 'FCFA' },
   activeTable: null, // { id, name } : table sur laquelle on ajoute des articles
+  backdate: null, // mode rattrapage : journée passée (AAAA-MM-JJ) à laquelle les ventes sont enregistrées
   refreshTimer: null,
 };
 
@@ -53,7 +54,10 @@ async function api(method, url, body) {
   try {
     res = await fetch(url, {
       method,
-      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      headers: {
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        ...(state.backdate && isAdmin() ? { 'X-Ice-Date': state.backdate } : {}),
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
       credentials: 'same-origin',
     });
@@ -319,7 +323,7 @@ function formModal({ title, fields, submitLabel = 'Enregistrer', onSubmit }) {
     }
     return `<label for="${id}">${esc(f.label)}
       <input id="${id}" name="${f.name}" type="${f.type || 'text'}" value="${esc(f.value ?? '')}"
-        ${f.required ? 'required' : ''} ${f.min !== undefined ? `min="${f.min}"` : ''} ${f.type === 'number' ? 'step="1" inputmode="numeric"' : ''}
+        ${f.required ? 'required' : ''} ${f.min !== undefined ? `min="${f.min}"` : ''} ${f.max !== undefined ? `max="${f.max}"` : ''} ${f.type === 'number' ? 'step="1" inputmode="numeric"' : ''}
         ${f.placeholder ? `placeholder="${esc(f.placeholder)}"` : ''} ${f.autocomplete ? `autocomplete="${f.autocomplete}"` : ''} ${f.maxlength ? `maxlength="${f.maxlength}"` : ''}>
       ${f.hint ? `<span class="muted small">${esc(f.hint)}</span>` : ''}</label>`;
   };
@@ -428,8 +432,61 @@ function showApp() {
   document.title = state.settings.bar_name;
   $('#user-name').textContent = state.user.full_name;
   $('#user-role').textContent = `${state.user.username} · ${state.user.role === 'admin' ? 'Responsable' : 'Serveur'}`;
+  $('#menu-backdate').hidden = !isAdmin();
+  try { state.backdate = isAdmin() ? sessionStorage.getItem('ice-backdate') : null; } catch { state.backdate = null; }
+  if (state.backdate) historyState.date = state.backdate;
+  renderBackdateBanner();
   renderNav();
   route();
+}
+
+/* ---------- Mode rattrapage (ventes passées) ---------- */
+function setBackdate(date) {
+  state.backdate = date;
+  try {
+    if (date) sessionStorage.setItem('ice-backdate', date);
+    else sessionStorage.removeItem('ice-backdate');
+  } catch { /* stockage indisponible : le mode reste actif jusqu'au rechargement */ }
+  if (date) historyState.date = date;
+  renderBackdateBanner();
+  route();
+}
+
+function renderBackdateBanner() {
+  const banner = $('#backdate-banner');
+  document.body.classList.toggle('backdating', !!state.backdate);
+  banner.hidden = !state.backdate;
+  if (!state.backdate) return;
+  banner.innerHTML = `
+    <span>🕘 <strong>Mode rattrapage</strong> : les ventes sont enregistrées au <strong>${esc(longDate(state.backdate))}</strong>.</span>
+    <span class="backdate-actions">
+      <button class="btn btn-sm" type="button" data-backdate-change>Changer la date</button>
+      <button class="btn btn-sm btn-primary" type="button" data-backdate-stop>Terminer le rattrapage</button>
+    </span>`;
+  $('[data-backdate-change]', banner).addEventListener('click', openBackdateModal);
+  $('[data-backdate-stop]', banner).addEventListener('click', () => {
+    setBackdate(null);
+    toast('Rattrapage terminé : les ventes sont de nouveau enregistrées à la date du jour.', 'ok');
+  });
+}
+
+function openBackdateModal() {
+  const yesterday = addDays(isoDate(), -1);
+  const oldest = addDays(isoDate(), -365);
+  formModal({
+    title: 'Saisir des ventes passées',
+    fields: [{
+      name: 'date', label: 'Journée à rattraper', type: 'date', required: true,
+      value: state.backdate || yesterday, min: oldest, max: yesterday,
+      hint: 'Tant que le mode rattrapage est actif, les commandes, paiements et sorties de stock sont enregistrés à cette date. Saisissez les ventes comme d’habitude, en les encaissant.',
+    }],
+    submitLabel: 'Commencer le rattrapage',
+    onSubmit: async (v) => {
+      if (!v.date || v.date > yesterday || v.date < oldest) throw new Error('Choisissez une journée passée (un an maximum).');
+      setBackdate(v.date);
+      toast(`Rattrapage du ${fmtDate(v.date)} : saisissez les ventes comme d’habitude.`, 'ok');
+    },
+  });
 }
 
 $('#login-form').addEventListener('submit', async (e) => {
@@ -460,9 +517,12 @@ $('#user-btn').addEventListener('click', (e) => {
 document.addEventListener('click', () => { $$('.user-menu').forEach((m) => { m.hidden = true; }); });
 $('#user-menu').addEventListener('click', async (e) => {
   const action = e.target.dataset.action;
-  if (action === 'logout') {
+  if (action === 'backdate') {
+    openBackdateModal();
+  } else if (action === 'logout') {
     await api('POST', '/api/auth/logout').catch(() => {});
     state.activeTable = null;
+    setBackdate(null);
     showLogin();
   } else if (action === 'password') {
     formModal({
@@ -665,7 +725,7 @@ async function renderHome(m, seq) {
 
   const paint = (d, orders) => {
     $('#home-kpis').innerHTML = `<div class="kpis">
-      ${kpi('Encaissé aujourd’hui', money(d.collected), `${d.orders_paid} commande(s) payée(s)`, true)}
+      ${kpi(state.backdate ? `Encaissé le ${fmtDate(d.date)}` : 'Encaissé aujourd’hui', money(d.collected), `${d.orders_paid} commande(s) payée(s)`, true)}
       ${kpi('Espèces (Cash)', money(d.by_type.cash))}
       ${kpi('Mobile Money', money(d.by_type.mobile_money))}
       ${d.by_type.other ? kpi('Autres paiements', money(d.by_type.other)) : ''}
@@ -682,7 +742,7 @@ async function renderHome(m, seq) {
       ${isAdmin() ? '<span class="spacer"></span><a class="btn btn-sm" href="#/stock">Gérer le stock</a>' : ''}
     </div>` : '';
     $('#home-top').innerHTML = d.top_products.length ? `
-      <h2>🏆 Produits les plus vendus aujourd’hui</h2>
+      <h2>🏆 Produits les plus vendus ${state.backdate ? `le ${fmtDate(d.date)}` : 'aujourd’hui'}</h2>
       <div class="card">${barList(d.top_products, { label: (p) => p.product_name, value: (p) => p.quantity,
         title: (p) => `${p.product_name} : ${p.quantity} vendu(s) – ${money(p.amount)}` })}</div>` : '';
     setOpenCount(orders.length);
@@ -1166,7 +1226,8 @@ async function renderHistory(m, seq) {
   const paidOrders = orders.filter((o) => o.status === 'paid');
   const view = $('#view');
   view.innerHTML = `
-    <div class="page-head"><div><h1>Historique des commandes</h1><div class="muted">${esc(longDate(historyState.date))}</div></div></div>
+    <div class="page-head"><div><h1>Historique des commandes</h1><div class="muted">${esc(longDate(historyState.date))}</div></div>
+      ${isAdmin() && !state.backdate ? '<div class="actions"><button class="btn" type="button" id="start-backdate">🕘 Saisir des ventes passées</button></div>' : ''}</div>
     <div class="filters">
       <div class="row">
         <button class="btn btn-icon" type="button" id="prev-day" aria-label="Jour précédent">‹</button>
@@ -1197,6 +1258,7 @@ async function renderHistory(m, seq) {
     : '<div class="empty">Aucune commande pour cette date.</div>'}`;
 
   const go = (date) => { historyState.date = date; route(); };
+  $('#start-backdate', view)?.addEventListener('click', openBackdateModal);
   $('#h-date', view).addEventListener('change', (e) => { if (e.target.value) go(e.target.value); });
   $('#prev-day', view).addEventListener('click', () => go(addDays(historyState.date, -1)));
   $('#next-day', view).addEventListener('click', () => go(addDays(historyState.date, 1)));

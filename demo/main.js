@@ -82,12 +82,12 @@ function makeResponse() {
 }
 
 /** Exécute une requête sur l'application locale. */
-async function run(method, url, body) {
+async function run(method, url, body, extraHeaders = {}) {
   const u = new URL(url, 'https://ice.local');
   const res = makeResponse();
   const req = {
     method, url, path: u.pathname, query: Object.fromEntries(u.searchParams), params: {}, body,
-    headers: { cookie }, ip: '127.0.0.1',
+    headers: { ...extraHeaders, cookie }, ip: '127.0.0.1',
   };
   try {
     await current.app.handle(req, res);
@@ -181,7 +181,7 @@ function serialized(fn) {
 }
 
 /** Applique une modification et la publie pour tous les appareils. */
-function sharedWrite(method, url, body) {
+function sharedWrite(method, url, body, headers) {
   return serialized(async () => {
     await shared.acquire();
     try {
@@ -192,7 +192,7 @@ function sharedWrite(method, url, body) {
         globalThis.dispatchEvent(new CustomEvent('ice:remote-change'));
       }
       const before = totalChanges();
-      const res = await run(method, url, body);
+      const res = await run(method, url, body, headers);
       if (totalChanges() !== before) {
         try {
           current.version = await shared.publish(current.version, exportBytes());
@@ -349,8 +349,11 @@ async function handle(url, init = {}) {
   if (path === '/api/images' && method === 'POST') return uploadImage(body);
   if (path === '/api/platform/restore' && method === 'POST') return restore(body);
 
-  if (MODE === 'shared' && method !== 'GET') return sharedWrite(method, url, body);
-  const res = await run(method, url, body);
+  // En-têtes utiles à l'application (date de rattrapage), en minuscules comme dans Express.
+  const headers = {};
+  for (const [k, v] of Object.entries(init.headers || {})) if (/^x-ice-/i.test(k)) headers[k.toLowerCase()] = v;
+  if (MODE === 'shared' && method !== 'GET') return sharedWrite(method, url, body, headers);
+  const res = await run(method, url, body, headers);
   if (MODE === 'demo' && method !== 'GET') persistDemo();
   return toResponse(res);
 }
