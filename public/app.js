@@ -1315,37 +1315,41 @@ async function adminProducts(body, seq) {
         <td><button class="btn btn-sm" data-act="toggle" data-id="${p.id}">${p.available ? '✅ Disponible' : '⛔ Indisponible'}</button></td>
         <td class="right"><div class="row" style="justify-content:flex-end">
           <button class="btn btn-sm" data-act="edit" data-id="${p.id}">Modifier</button>
+          <button class="btn btn-sm" data-act="duplicate" data-id="${p.id}" title="Créer un nouveau produit à partir de celui-ci">Dupliquer</button>
           <button class="btn btn-sm btn-danger" data-act="remove" data-id="${p.id}">Supprimer</button></div></td>
       </tr>`).join('')}</tbody></table></div>`
     : `<div class="empty">${families.length ? 'Aucun produit.' : 'Créez d’abord une famille de produits.'}</div>`}`;
 
   $('#pf', body).addEventListener('change', (e) => { productFilter.family = e.target.value; route(); });
   const familyOptions = families.map((f) => ({ value: f.id, label: f.name }));
-  const form = (p) => formModal({
-    title: p ? `Modifier « ${p.name} »` : 'Nouveau produit',
+  // `p` : produit à modifier. `model` : produit dupliqué, qui pré-remplit un nouveau produit.
+  const form = (p, model = p) => formModal({
+    title: p ? `Modifier « ${p.name} »` : model ? `Dupliquer « ${model.name} »` : 'Nouveau produit',
     fields: [
-      { name: 'name', label: 'Nom du produit', required: true, value: p?.name, maxlength: 80 },
-      { name: 'family_id', label: 'Famille', type: 'select', options: familyOptions, value: p?.family_id ?? (productFilter.family || families[0]?.id) },
-      { name: 'price', label: `Prix de vente unitaire (${state.settings.currency})`, type: 'number', min: 0, required: true, value: p?.price },
-      { name: 'cost_price', label: `Prix d’achat unitaire (${state.settings.currency})`, type: 'number', min: 0, value: p?.cost_price ?? 0, hint: 'Sert au calcul de la marge brute dans les statistiques.' },
-      { name: 'available', label: 'Disponible à la vente', type: 'checkbox', value: p ? !!p.available : true },
-      { name: 'track_stock', label: 'Activer le suivi du stock', type: 'checkbox', value: !!p?.track_stock },
+      { name: 'name', label: 'Nom du produit', required: true, value: p ? p.name : model ? `${model.name} (copie)` : '', maxlength: 80 },
+      { name: 'family_id', label: 'Famille', type: 'select', options: familyOptions, value: model?.family_id ?? (productFilter.family || families[0]?.id) },
+      { name: 'price', label: `Prix de vente unitaire (${state.settings.currency})`, type: 'number', min: 0, required: true, value: model?.price },
+      { name: 'cost_price', label: `Prix d’achat unitaire (${state.settings.currency})`, type: 'number', min: 0, value: model?.cost_price ?? 0, hint: 'Sert au calcul de la marge brute dans les statistiques.' },
+      { name: 'available', label: 'Disponible à la vente', type: 'checkbox', value: model ? !!model.available : true },
+      { name: 'track_stock', label: 'Activer le suivi du stock', type: 'checkbox', value: !!model?.track_stock },
       ...(p ? [] : [{ name: 'stock', label: 'Stock initial', type: 'number', min: 0, value: 0, hint: 'Ensuite, utilisez l’écran Stock pour les entrées, pertes et inventaires.' }]),
-      { name: 'alert_threshold', label: 'Seuil d’alerte de stock bas', type: 'number', min: 0, value: p?.alert_threshold ?? 0, hint: 'Une alerte s’affiche quand le stock disponible atteint ce niveau.' },
+      { name: 'alert_threshold', label: 'Seuil d’alerte de stock bas', type: 'number', min: 0, value: model?.alert_threshold ?? 0, hint: 'Une alerte s’affiche quand le stock disponible atteint ce niveau.' },
     ],
+    submitLabel: p ? 'Enregistrer' : 'Créer le produit',
     onSubmit: async (v) => {
       const payload = { ...v, family_id: Number(v.family_id) };
       if (!p) payload.stock = v.stock ?? 0;
       for (const k of ['cost_price', 'alert_threshold']) if (payload[k] === undefined) payload[k] = 0;
       if (p) await api('PUT', `/api/products/${p.id}`, payload);
       else await api('POST', '/api/products', payload);
-      toast(p ? 'Produit modifié.' : 'Produit ajouté.', 'ok');
+      toast(p ? 'Produit modifié.' : `Produit « ${v.name} » ajouté.`, 'ok');
       route();
     },
   });
   onActions(body, {
     add: () => form(null),
     edit: (id) => form(products.find((p) => p.id === id)),
+    duplicate: (id) => form(null, products.find((p) => p.id === id)),
     toggle: async (id) => {
       const p = products.find((x) => x.id === id);
       try { await api('PUT', `/api/products/${id}`, { available: !p.available }); route(); } catch (err) { toast(err.message, 'err'); }
