@@ -724,7 +724,18 @@ async function renderHome(m, seq) {
       <div id="home-open"></div>
     </div>
     <div class="section" id="home-top"></div>`;
-  view.querySelector('.section').insertAdjacentHTML('beforebegin', '<div id="home-stock"></div>');
+  view.querySelector('.section').insertAdjacentHTML('beforebegin', '<div id="home-stock"></div><div id="home-resets"></div>');
+  // Responsable : demandes « mot de passe oublié » des serveurs.
+  if (isAdmin()) {
+    api('GET', '/api/users').then((users) => {
+      const asking = users.filter((u) => u.reset_requested_at && u.active);
+      if (seq !== renderSeq || !asking.length) return;
+      $('#home-resets').innerHTML = `<div class="banner banner-warn section">
+        <span>🔑 <strong>${asking.map((u) => esc(u.full_name)).join(', ')}</strong> ${asking.length > 1 ? 'demandent' : 'demande'}
+          un nouveau mot de passe.</span>
+        <span class="spacer"></span><a class="btn btn-sm" href="#/gestion/utilisateurs">Définir le mot de passe</a></div>`;
+    }).catch(() => {});
+  }
   bindBanner(view);
 
   const paint = (d, orders) => {
@@ -2110,7 +2121,8 @@ async function adminUsers(body, seq) {
       <tbody>${users.map((u) => `<tr>
         <td><strong>${esc(u.full_name)}</strong>${u.id === state.user.id ? ' <span class="muted small">(vous)</span>' : ''}</td>
         <td class="num">${esc(u.username)}</td><td>${roleLabel(u.role)}</td>
-        <td>${u.active ? '<span class="badge badge-paid">Actif</span>' : '<span class="badge badge-cancelled">Désactivé</span>'}</td>
+        <td>${u.active ? '<span class="badge badge-paid">Actif</span>' : '<span class="badge badge-cancelled">Désactivé</span>'}
+          ${u.reset_requested_at ? `<br><span class="badge badge-open" title="Demande du ${fmtDateTime(u.reset_requested_at)}">🔑 Demande un nouveau mot de passe</span>` : ''}</td>
         <td class="right"><button class="btn btn-sm" data-act="edit" data-id="${u.id}">Modifier</button></td>
       </tr>`).join('')}</tbody></table></div>
     <p class="muted small">Le responsable a accès à la gestion, aux statistiques et peut annuler des commandes. Le serveur prend les commandes et encaisse.</p>`;
@@ -2166,10 +2178,146 @@ async function adminSettings(body) {
     } catch (err) { $('#settings-error', body).textContent = err.message; }
   });
   // Point d'extension : la version navigateur y ajoute la sauvegarde / restauration.
+  // Code de secours du responsable (mot de passe oublié).
+  body.insertAdjacentHTML('beforeend', `
+    <div class="card form-grid" style="max-width:520px;margin-top:1rem" id="recovery-card">
+      <h3>🔑 Code de secours</h3>
+      <p class="muted small">Il permet de retrouver l’accès à votre compte si vous oubliez votre mot de passe
+        (lien « Mot de passe oublié ? » de l’écran de connexion). Générez-en un nouveau si vous l’avez perdu :
+        l’ancien cesse aussitôt de fonctionner.</p>
+      <p id="recovery-status" class="small"></p>
+      <div><button class="btn" type="button" id="recovery-new">Générer un nouveau code</button></div>
+    </div>`);
+  api('GET', '/api/auth/recovery-code').then((r) => {
+    $('#recovery-status', body).innerHTML = r.configured
+      ? '✅ Un code de secours existe pour votre compte.'
+      : '<span class="badge badge-open">⚠️ Aucun code de secours : générez-en un maintenant.</span>';
+  }).catch(() => {});
+  $('#recovery-new', body).addEventListener('click', () => formModal({
+    title: 'Nouveau code de secours',
+    fields: [{ name: 'current_password', label: 'Votre mot de passe actuel', type: 'password', required: true, autocomplete: 'current-password' }],
+    submitLabel: 'Générer le code',
+    onSubmit: async (v) => {
+      const { recovery_code: code } = await api('POST', '/api/auth/recovery-code', v);
+      setTimeout(() => showRecoveryCode(code).then(route), 0);
+    },
+  }));
   window.iceHooks?.settingsExtras?.(body);
 }
 
 /* ---------- Démarrage ---------- */
+/* ---------- Mot de passe oublié ---------- */
+
+/** Affiche un code de secours à noter. Se résout quand la personne confirme l'avoir noté. */
+function showRecoveryCode(code, intro = '') {
+  return new Promise((resolve) => {
+    let done = false;
+    const modal = openModal({
+      title: '🔑 Votre code de secours',
+      body: `${intro ? `<p><strong>${esc(intro)}</strong></p>` : ''}
+        <p>Ce code permet de retrouver l’accès au compte responsable si vous oubliez votre mot de passe
+          (lien « Mot de passe oublié ? » de l’écran de connexion).</p>
+        <div class="recovery-code" id="recovery-code">${esc(code)}</div>
+        <p class="muted small">Notez-le sur papier et gardez-le en lieu sûr : il ne sera plus affiché.
+          Il ne sert qu’une fois ; un nouveau code vous est alors donné.</p>`,
+      foot: `<button class="btn" type="button" id="recovery-copy">Copier</button>
+        <button class="btn btn-primary" type="button" id="recovery-ok">J’ai noté mon code</button>`,
+      onClose: () => { if (!done) { done = true; resolve(); } },
+    });
+    $('#recovery-copy', modal).addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(code);
+        toast('Code copié.', 'ok');
+      } catch {
+        getSelection().selectAllChildren($('#recovery-code', modal));
+        toast('Code sélectionné : utilisez Ctrl+C (ou Cmd+C) pour le copier.');
+      }
+    });
+    $('#recovery-ok', modal).addEventListener('click', () => closeModal());
+  });
+}
+
+function showForgot() {
+  const loginForm = $('#login-form');
+  loginForm.hidden = true;
+  const card = document.createElement('form');
+  card.className = 'login-card setup-card';
+  card.id = 'forgot-form';
+  card.noValidate = true;
+  card.innerHTML = `
+    <div class="login-logo" aria-hidden="true">🔑</div>
+    <h1>Mot de passe oublié</h1>
+    <label>Votre identifiant<input id="forgot-user" name="username" maxlength="50" autocomplete="username" required
+      value="${esc(loginForm.username.value)}"></label>
+    <div class="seg forgot-modes" role="group" aria-label="Je suis">
+      <button type="button" data-mode="code" class="active">Responsable : j’ai mon code de secours</button>
+      <button type="button" data-mode="ask">Serveur : prévenir le responsable</button>
+    </div>
+    <div class="form-grid" data-panel="code">
+      <label>Code de secours<input id="forgot-code" name="recovery_code" maxlength="20" autocomplete="off"
+        placeholder="XXXX-XXXX-XXXX" class="code-input"></label>
+      <label>Nouveau mot de passe<input id="forgot-pass" name="new_password" type="password" autocomplete="new-password"></label>
+      <label>Confirmer le mot de passe<input id="forgot-pass2" name="confirm" type="password" autocomplete="new-password"></label>
+    </div>
+    <p class="muted small" data-panel="ask" hidden>Le responsable verra votre demande dans l’application et vous donnera
+      un nouveau mot de passe.</p>
+    <div id="forgot-extra"></div>
+    <p class="form-error" id="forgot-error" role="alert"></p>
+    <button class="btn btn-primary btn-lg btn-block" type="submit" id="forgot-submit">Changer mon mot de passe</button>
+    <button class="link-btn" type="button" id="forgot-back">← Retour à la connexion</button>`;
+  loginForm.after(card);
+  let mode = 'code';
+  const setMode = (m) => {
+    mode = m;
+    $$('[data-mode]', card).forEach((b) => b.classList.toggle('active', b.dataset.mode === m));
+    $$('[data-panel]', card).forEach((p) => { p.hidden = p.dataset.panel !== m; });
+    $('#forgot-submit', card).textContent = m === 'code' ? 'Changer mon mot de passe' : 'Prévenir le responsable';
+    $('#forgot-error', card).textContent = '';
+  };
+  $$('[data-mode]', card).forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
+  const back = () => { card.remove(); loginForm.hidden = false; };
+  $('#forgot-back', card).addEventListener('click', back);
+  setTimeout(() => $('#forgot-user', card).focus(), 30);
+  // Point d'extension : la plateforme claude.ai ajoute la réinitialisation par le propriétaire du lien.
+  window.iceHooks?.forgotExtras?.($('#forgot-extra', card), { back, card });
+
+  card.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const error = $('#forgot-error', card);
+    const v = Object.fromEntries(new FormData(card));
+    if (!v.username.trim()) { error.textContent = 'Indiquez votre identifiant.'; return; }
+    const btn = $('#forgot-submit', card);
+    btn.disabled = true;
+    try {
+      if (mode === 'ask') {
+        await api('POST', '/api/auth/forgot', { username: v.username.trim() });
+        card.innerHTML = `
+          <div class="login-logo" aria-hidden="true">📨</div>
+          <h1>Demande envoyée</h1>
+          <p>Le responsable est prévenu. Demandez-lui votre nouveau mot de passe, puis connectez-vous.</p>
+          <button class="btn btn-primary btn-lg btn-block" type="button" id="forgot-done">Retour à la connexion</button>`;
+        $('#forgot-done', card).addEventListener('click', back);
+        return;
+      }
+      if (!v.recovery_code.trim()) throw new Error('Saisissez votre code de secours.');
+      if (v.new_password.length < 6) throw new Error('Le nouveau mot de passe doit contenir au moins 6 caractères.');
+      if (v.new_password !== v.confirm) throw new Error('Les deux mots de passe ne correspondent pas.');
+      const res = await api('POST', '/api/auth/forgot', {
+        username: v.username.trim(), recovery_code: v.recovery_code, new_password: v.new_password,
+      });
+      await showRecoveryCode(res.recovery_code, 'Mot de passe changé. Votre ancien code de secours ne fonctionne plus : voici le nouveau.');
+      back();
+      loginForm.username.value = v.username.trim();
+      loginForm.password.value = v.new_password;
+      loginForm.requestSubmit();
+    } catch (err) {
+      error.textContent = err.message;
+      btn.disabled = false;
+    }
+  });
+}
+$('#forgot-link').addEventListener('click', showForgot);
+
 /** Première ouverture : création de l'établissement et du compte du responsable. */
 function showSetup() {
   $('#app').hidden = true;
@@ -2211,8 +2359,9 @@ function showSetup() {
     const btn = $('button[type=submit]', card);
     btn.disabled = true;
     btn.textContent = 'Création en cours…';
+    let recoveryCode = null;
     try {
-      await api('POST', '/api/platform/setup', v);
+      recoveryCode = (await api('POST', '/api/platform/setup', v)).recovery_code;
     } catch (err) {
       if (err.status !== 409) {
         error.textContent = err.message;
@@ -2224,7 +2373,8 @@ function showSetup() {
     }
     card.remove();
     loginForm.hidden = false;
-    // Connexion automatique avec le compte qui vient d'être créé.
+    // Code de secours à noter, puis connexion automatique avec le compte qui vient d'être créé.
+    if (recoveryCode) await showRecoveryCode(recoveryCode, 'Votre établissement est créé.');
     loginForm.username.value = v.username;
     loginForm.password.value = v.password;
     loginForm.requestSubmit();

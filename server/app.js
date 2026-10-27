@@ -3,7 +3,9 @@
 const path = require('node:path');
 const express = require('express');
 const { HttpError, badRequest, toText } = require('./http');
-const { hashPassword, verifyPassword, newToken, createLoginLimiter } = require('./security');
+const {
+  hashPassword, verifyPassword, newToken, newRecoveryCode, normalizeRecoveryCode, createLoginLimiter,
+} = require('./security');
 const { nowLocal, todayLocal, isIsoDate } = require('./time');
 const { seed, hasUsers } = require('./db');
 const catalogRoutes = require('./routes/catalog');
@@ -31,6 +33,14 @@ function parseCookies(header = '') {
 function createApp(db, { secureCookies = false, trustProxy = 'loopback' } = {}) {
   const app = express();
   const loginLimiter = createLoginLimiter();
+  const recoveryLimiter = createLoginLimiter();
+
+  /** Nouveau code de secours d'un responsable : seul son empreinte est gardée ; le code est montré une fois. */
+  async function renewRecoveryCode(q, userId) {
+    const code = newRecoveryCode();
+    await q.run('UPDATE users SET recovery_hash = ? WHERE id = ?', hashPassword(normalizeRecoveryCode(code)), userId);
+    return code;
+  }
 
   app.disable('x-powered-by');
   // Derrière l'hébergeur (Render…), un proxy transmet l'adresse réelle du client.
@@ -64,7 +74,8 @@ function createApp(db, { secureCookies = false, trustProxy = 'loopback' } = {}) 
     if (password.length < 6) throw badRequest('Le mot de passe doit contenir au moins 6 caractères.');
     const created = await seed(db, { adminUsername: username, adminFullName: fullName, adminPassword: password, barName });
     if (!created) throw new HttpError(409, 'La plateforme est déjà configurée. Connectez-vous.');
-    res.status(201).json({ ok: true });
+    const admin = await db.get('SELECT id FROM users WHERE lower(username) = lower(?)', username);
+    res.status(201).json({ ok: true, recovery_code: await renewRecoveryCode(db, admin.id) });
   });
 
   // ---------- Authentification ----------
@@ -113,6 +124,38 @@ function createApp(db, { secureCookies = false, trustProxy = 'loopback' } = {}) 
       token, user.id, nowLocal(), Date.now() + SESSION_TTL_MS);
     setSessionCookie(res, token, SESSION_TTL_MS);
     res.json({ user: { id: user.id, username: user.username, full_name: user.full_name, role: user.role } });
+  });
+
+  /**
+   * Mot de passe oublié.
+   *  - Avec un code de secours (responsable) : nouveau mot de passe immédiat, le code est remplacé.
+   *  - Sans code : le responsable est prévenu (réponse identique que le compte existe ou non).
+   */
+  app.post('/api/auth/forgot', async (req, res) => {
+    const username = toText(req.body?.username, 'identifiant', { max: 50 });
+    const key = `${req.ip}|${username.toLowerCase()}`;
+    if (recoveryLimiter.isBlocked(key)) throw new HttpError(429, 'Trop de tentatives. Réessayez dans quelques minutes.');
+    const user = await db.get('SELECT * FROM users WHERE lower(username) = lower(?) AND active = 1', username);
+
+    if (req.body?.recovery_code === undefined) {
+      if (user) await db.run('UPDATE users SET reset_requested_at = ? WHERE id = ?', nowLocal(), user.id);
+      return res.json({ status: 'requested' });
+    }
+
+    const password = String(req.body?.new_password ?? '');
+    if (password.length < 6) throw badRequest('Le nouveau mot de passe doit contenir au moins 6 caractères.');
+    const code = normalizeRecoveryCode(req.body.recovery_code);
+    if (!user?.recovery_hash || !verifyPassword(code, user.recovery_hash)) {
+      recoveryLimiter.fail(key);
+      throw badRequest('Identifiant ou code de secours incorrect.');
+    }
+    recoveryLimiter.reset(key);
+    const fresh = await db.transaction(async (tx) => {
+      await tx.run('UPDATE users SET password_hash = ?, reset_requested_at = NULL WHERE id = ?', hashPassword(password), user.id);
+      await tx.run('DELETE FROM sessions WHERE user_id = ?', user.id); // déconnecte tous ses appareils
+      return renewRecoveryCode(tx, user.id);
+    });
+    res.json({ status: 'reset', recovery_code: fresh });
   });
 
   app.post('/api/auth/logout', async (req, res) => {
@@ -164,6 +207,20 @@ function createApp(db, { secureCookies = false, trustProxy = 'loopback' } = {}) 
     // Déconnecte les autres appareils.
     await db.run('DELETE FROM sessions WHERE user_id = ? AND token <> ?', req.user.id, req.sessionToken);
     res.json({ ok: true });
+  });
+
+  // Code de secours du responsable connecté : savoir s'il existe, en générer un nouveau.
+  app.get('/api/auth/recovery-code', requireAdmin, async (req, res) => {
+    const { recovery_hash: hash } = await db.get('SELECT recovery_hash FROM users WHERE id = ?', req.user.id);
+    res.json({ configured: Boolean(hash) });
+  });
+
+  app.post('/api/auth/recovery-code', requireAdmin, async (req, res) => {
+    const user = await db.get('SELECT password_hash FROM users WHERE id = ?', req.user.id);
+    if (!verifyPassword(String(req.body?.current_password ?? ''), user.password_hash)) {
+      throw badRequest('Mot de passe actuel incorrect.');
+    }
+    res.json({ recovery_code: await renewRecoveryCode(db, req.user.id) });
   });
 
   // ---------- Paramètres ----------

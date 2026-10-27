@@ -165,6 +165,18 @@ label.check input { width: 22px; min-height: 22px; height: 22px; }
 .login-logo { font-size: 3rem; }
 .setup-card { width: min(440px, 100%); }
 .setup-card h1 { text-wrap: balance; }
+.link-btn {
+  background: none; border: 0; padding: .3rem; font: inherit; font-size: .92rem; font-weight: 600;
+  color: var(--primary); cursor: pointer; text-decoration: underline; text-underline-offset: 3px; justify-self: center;
+}
+.forgot-modes { display: grid; grid-template-columns: 1fr 1fr; }
+.forgot-modes button { white-space: normal; line-height: 1.25; font-size: .88rem; }
+.code-input { text-transform: uppercase; letter-spacing: .12em; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.recovery-code {
+  text-align: center; font: 700 1.7rem/1.2 ui-monospace, Menlo, Consolas, monospace; letter-spacing: .12em;
+  padding: 1rem; border: 2px dashed var(--primary); border-radius: 12px; background: var(--primary-soft);
+  color: var(--primary-strong); user-select: all; overflow-wrap: anywhere;
+}
 
 /* ---------- Structure ---------- */
 .app { min-height: 100vh; }

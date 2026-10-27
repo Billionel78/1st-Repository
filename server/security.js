@@ -18,6 +18,15 @@ function verifyPassword(password, stored) {
   return crypto.timingSafeEqual(expected, actual);
 }
 
+// Code de secours du responsable : 12 caractères faciles à recopier (sans 0/O, 1/I/L), groupés par 4.
+const RECOVERY_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const normalizeRecoveryCode = (code) => String(code ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+function newRecoveryCode() {
+  const chars = Array.from({ length: 12 }, () => RECOVERY_ALPHABET[crypto.randomInt(RECOVERY_ALPHABET.length)]).join('');
+  return chars.match(/.{4}/g).join('-');
+}
+
 function newToken() {
   return crypto.randomBytes(32).toString('hex');
 }
@@ -46,4 +55,4 @@ function createLoginLimiter({ maxAttempts = 5, windowMs = 5 * 60 * 1000 } = {}) 
   };
 }
 
-module.exports = { hashPassword, verifyPassword, newToken, createLoginLimiter };
+module.exports = { hashPassword, verifyPassword, newToken, newRecoveryCode, normalizeRecoveryCode, createLoginLimiter };

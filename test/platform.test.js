@@ -9,6 +9,7 @@ for (const backend of BACKENDS) describe(backend.name, () => {
   let server;
   let db;
   let baseUrl;
+  let recoveryCode;
 
   function client() {
     let cookie = '';
@@ -45,6 +46,8 @@ for (const backend of BACKENDS) describe(backend.name, () => {
       bar_name: 'Bar Le Glacier', full_name: 'Koffi Mensah', username: 'Koffi', password: 'glacier2026',
     });
     assert.equal(ok.status, 201);
+    assert.match(ok.data.recovery_code, /^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+    recoveryCode = ok.data.recovery_code;
     assert.equal((await call('POST', '/api/platform/setup', {
       bar_name: 'Autre', full_name: 'Intrus', username: 'intrus', password: 'abcdefgh',
     })).status, 409);
@@ -75,5 +78,48 @@ for (const backend of BACKENDS) describe(backend.name, () => {
       assert.equal(o.items[0].quantity, 6);
       assert.equal(o.total, 6 * product.price);
     }
+  });
+
+  test('mot de passe oublié : code de secours du responsable, demande d’un serveur', async () => {
+    const admin = client();
+    // Mauvais code : refusé, sans dire si le compte existe.
+    const bad = await admin('POST', '/api/auth/forgot', { username: 'koffi', recovery_code: 'AAAA-BBBB-CCCC', new_password: 'nouveau1' });
+    assert.equal(bad.status, 400);
+    // Bon code (saisi en minuscules, sans tirets) : nouveau mot de passe et nouveau code.
+    const reset = await admin('POST', '/api/auth/forgot', {
+      username: 'KOFFI', recovery_code: recoveryCode.toLowerCase().replaceAll('-', ' '), new_password: 'nouveau1',
+    });
+    assert.equal(reset.status, 200);
+    assert.notEqual(reset.data.recovery_code, recoveryCode);
+    assert.equal((await admin('POST', '/api/auth/login', { username: 'koffi', password: 'glacier2026' })).status, 401);
+    assert.equal((await admin('POST', '/api/auth/login', { username: 'koffi', password: 'nouveau1' })).status, 200);
+    // L'ancien code ne sert plus.
+    assert.equal((await client()('POST', '/api/auth/forgot', { username: 'koffi', recovery_code: recoveryCode, new_password: 'autre123' })).status, 400);
+
+    // Serveur : demande transmise au responsable (même réponse pour un compte inconnu).
+    await admin('POST', '/api/users', { username: 'awa', full_name: 'Awa', role: 'serveur', password: 'serveur1' });
+    const anon = client();
+    assert.deepEqual((await anon('POST', '/api/auth/forgot', { username: 'awa' })).data, { status: 'requested' });
+    assert.deepEqual((await anon('POST', '/api/auth/forgot', { username: 'inconnu' })).data, { status: 'requested' });
+    // Un serveur n'a pas de code de secours : le code ne marche pas pour lui.
+    assert.equal((await anon('POST', '/api/auth/forgot', { username: 'awa', recovery_code: reset.data.recovery_code, new_password: 'xxxxxx' })).status, 400);
+    let awa = (await admin('GET', '/api/users')).data.find((u) => u.username === 'awa');
+    assert.ok(awa.reset_requested_at);
+    await admin('PUT', `/api/users/${awa.id}`, { password: 'serveur2' });
+    awa = (await admin('GET', '/api/users')).data.find((u) => u.username === 'awa');
+    assert.equal(awa.reset_requested_at, null);
+    assert.equal((await anon('POST', '/api/auth/login', { username: 'awa', password: 'serveur2' })).status, 200);
+
+    // Nouveau code à la demande du responsable (mot de passe exigé) ; réservé au responsable.
+    assert.equal((await admin('POST', '/api/auth/recovery-code', { current_password: 'faux' })).status, 400);
+    const fresh = await admin('POST', '/api/auth/recovery-code', { current_password: 'nouveau1' });
+    assert.match(fresh.data.recovery_code, /^[A-Z2-9-]{14}$/);
+    assert.deepEqual((await admin('GET', '/api/auth/recovery-code')).data, { configured: true });
+    assert.equal((await anon('GET', '/api/auth/recovery-code')).status, 403);
+
+    // Tentatives répétées : bloquées.
+    const spam = client();
+    for (let i = 0; i < 5; i++) await spam('POST', '/api/auth/forgot', { username: 'koffi', recovery_code: 'XXXX', new_password: 'abcdef' });
+    assert.equal((await spam('POST', '/api/auth/forgot', { username: 'koffi', recovery_code: fresh.data.recovery_code, new_password: 'abcdef' })).status, 429);
   });
 });

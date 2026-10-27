@@ -26,7 +26,8 @@ module.exports = function userRoutes(app, db, { requireAdmin }) {
   }
 
   app.get('/api/users', requireAdmin, async (req, res) => {
-    res.json(await db.all('SELECT id, username, full_name, role, active, created_at FROM users ORDER BY active DESC, full_name'));
+    res.json(await db.all(`SELECT id, username, full_name, role, active, created_at, reset_requested_at
+      FROM users ORDER BY active DESC, full_name`));
   });
 
   app.post('/api/users', requireAdmin, async (req, res) => {
@@ -64,7 +65,8 @@ module.exports = function userRoutes(app, db, { requireAdmin }) {
     await db.transaction(async (tx) => {
       if (losesAdmin && (await activeAdmins(tx)) <= 1) throw conflict('Il doit rester au moins un responsable actif.');
       await tx.run('UPDATE users SET full_name = ?, role = ?, active = ? WHERE id = ?', fullName, newRole, active, id);
-      if (pwd) await tx.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(pwd), id);
+      // Nouveau mot de passe défini par le responsable : la demande « mot de passe oublié » est traitée.
+      if (pwd) await tx.run('UPDATE users SET password_hash = ?, reset_requested_at = NULL WHERE id = ?', hashPassword(pwd), id);
       if (!active || pwd || newRole !== current.role) {
         await tx.run('DELETE FROM sessions WHERE user_id = ? AND token <> ?', id, req.sessionToken ?? '');
       }

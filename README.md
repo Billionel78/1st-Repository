@@ -153,6 +153,22 @@ Le suivi du stock s'active produit par produit (Gestion → Produits → « Acti
 - **Exports Excel (CSV)** : ventes par produit, commandes, encaissements (écran Statistiques, pour la
   période choisie), état du stock et mouvements de stock (écran Stock).
 
+### Mot de passe oublié
+
+Lien « Mot de passe oublié ? » sous le formulaire de connexion :
+
+- **Responsable** : à la création de l'établissement, un **code de secours** (`XXXX-XXXX-XXXX`) s'affiche une seule fois ;
+  notez-le sur papier. Avec ce code, le responsable choisit un nouveau mot de passe ; un nouveau code lui est alors donné
+  (chaque code ne sert qu'une fois) et toutes ses sessions ouvertes sont fermées. Code perdu : Gestion → Paramètres →
+  « Code de secours » → Générer un nouveau code (mot de passe actuel demandé).
+- **Serveur** : il prévient le responsable depuis l'écran de connexion. La demande apparaît sur l'accueil du responsable et
+  dans Gestion → Utilisateurs (🔑) ; le responsable définit un nouveau mot de passe, ce qui efface la demande.
+- **Plateforme en ligne (claude.ai)** : le propriétaire du lien peut en plus redéfinir le mot de passe d'un responsable
+  sans code de secours.
+
+Les tentatives de code erronées sont limitées (5 échecs, puis blocage de 5 minutes) ; la réponse ne révèle jamais si un
+identifiant existe.
+
 ### Rôles
 
 - **Responsable** (`admin`) : tout, plus la gestion (familles, produits, prix, stock, tables, moyens de

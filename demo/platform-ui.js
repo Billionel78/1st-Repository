@@ -116,6 +116,33 @@
 
   // Gestion → Paramètres : sauvegarde et restauration de toutes les données.
   window.iceHooks = {
+    // Mot de passe oublié : le propriétaire du lien claude.ai peut redéfinir le mot de passe du responsable.
+    forgotExtras(slot, { back, card }) {
+      if (info.mode !== 'shared' || !info.owner) return;
+      slot.innerHTML = `<div class="banner section owner-reset">
+        <span>Vous êtes le propriétaire de cette plateforme : vous pouvez redéfinir le mot de passe d’un compte
+          responsable sans code de secours.</span>
+        <button class="btn btn-sm" type="button" id="owner-reset-btn">Redéfinir sans code</button></div>`;
+      slot.querySelector('#owner-reset-btn').addEventListener('click', () => formModal({
+        title: 'Redéfinir le mot de passe du responsable',
+        fields: [
+          { name: 'username', label: 'Identifiant du responsable', required: true, value: card.querySelector('#forgot-user').value },
+          { name: 'new_password', label: 'Nouveau mot de passe (6 caractères min.)', type: 'password', required: true, autocomplete: 'new-password' },
+        ],
+        submitLabel: 'Enregistrer',
+        onSubmit: async (v) => {
+          const res = await fetch('/api/platform/owner-reset', { method: 'POST', body: JSON.stringify(v) });
+          const out = await res.json();
+          if (!res.ok) throw new Error(out.error);
+          toast('Mot de passe redéfini. Connectez-vous.', 'ok');
+          back();
+          const login = document.getElementById('login-form');
+          login.username.value = v.username;
+          login.password.value = v.new_password;
+          login.requestSubmit();
+        },
+      }));
+    },
     settingsExtras(body) {
       body.insertAdjacentHTML('beforeend', `
         <div class="card form-grid" style="max-width:520px;margin-top:1rem">

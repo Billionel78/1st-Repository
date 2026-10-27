@@ -314,6 +314,8 @@ const MIGRATIONS = [
   ['products', 'format', 'TEXT'],
   ['orders', 'customer_id', 'INTEGER REFERENCES customers(id)'],
   ['orders', 'customer_name', 'TEXT'],
+  ['users', 'recovery_hash', 'TEXT'],
+  ['users', 'reset_requested_at', 'TEXT'],
 ];
 
 /** Crée les tables manquantes et applique les migrations. */

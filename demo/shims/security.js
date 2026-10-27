@@ -61,10 +61,19 @@ function verifyPassword(password, stored) {
   return scheme === 'sha256' && derive(String(password), salt) === hash;
 }
 
+// Code de secours du responsable : 12 caractères faciles à recopier (sans 0/O, 1/I/L), groupés par 4.
+const RECOVERY_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+const normalizeRecoveryCode = (code) => String(code ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+function newRecoveryCode() {
+  const bytes = crypto.getRandomValues(new Uint32Array(12));
+  return Array.from(bytes, (n) => RECOVERY_ALPHABET[n % RECOVERY_ALPHABET.length]).join('').match(/.{4}/g).join('-');
+}
+
 const newToken = () => randomHex(32);
 
 function createLoginLimiter() {
   return { isBlocked: () => false, fail() {}, reset() {} };
 }
 
-module.exports = { hashPassword, verifyPassword, newToken, createLoginLimiter, sha256 };
+module.exports = { hashPassword, verifyPassword, newToken, newRecoveryCode, normalizeRecoveryCode, createLoginLimiter, sha256 };

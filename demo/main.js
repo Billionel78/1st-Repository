@@ -12,6 +12,7 @@ const { migrate, seed } = require('../server/db');
 const { SqliteDatabase } = require('../server/database');
 const { DatabaseSync } = require('./shims/sqlite');
 const { createApp } = require('../server/app');
+const { hashPassword } = require('../server/security');
 const { seedDemo } = require('./seed-demo');
 const { createSharedStore, SyncError, gzip, gunzip, toBase64, fromBase64 } = require('./shared-store');
 
@@ -182,6 +183,11 @@ function serialized(fn) {
 
 /** Applique une modification et la publie pour tous les appareils. */
 function sharedWrite(method, url, body, headers) {
+  return sharedMutate(async () => toResponse(await run(method, url, body, headers)));
+}
+
+/** Exécute `fn` sur la dernière version de la base, puis publie si elle a modifié des données. */
+function sharedMutate(fn) {
   return serialized(async () => {
     await shared.acquire();
     try {
@@ -192,7 +198,7 @@ function sharedWrite(method, url, body, headers) {
         globalThis.dispatchEvent(new CustomEvent('ice:remote-change'));
       }
       const before = totalChanges();
-      const res = await run(method, url, body, headers);
+      const res = await fn();
       if (totalChanges() !== before) {
         try {
           current.version = await shared.publish(current.version, exportBytes());
@@ -207,7 +213,7 @@ function sharedWrite(method, url, body, headers) {
           return json(503, { error: message });
         }
       }
-      return toResponse(res);
+      return res;
     } finally {
       shared.release();
     }
@@ -284,6 +290,29 @@ async function restore(body) {
   });
 }
 
+// ---------- Mot de passe oublié : le propriétaire du lien peut redéfinir le mot de passe d'un responsable ----------
+const viewer = () => (globalThis.claude?.use ? globalThis.claude.use('user') : Promise.resolve(null));
+async function isLinkOwner() {
+  try { return (await viewer())?.isOwner() ?? false; } catch { return false; }
+}
+
+async function ownerReset(body) {
+  if (!(await isLinkOwner())) {
+    return json(403, { error: 'Réservé au propriétaire de la plateforme (le compte claude.ai qui l’a créée).' });
+  }
+  const username = String(body?.username ?? '').trim();
+  const password = String(body?.new_password ?? '');
+  if (password.length < 6) return json(400, { error: 'Le nouveau mot de passe doit contenir au moins 6 caractères.' });
+  return sharedMutate(async () => {
+    const user = await current.db.get(
+      "SELECT id FROM users WHERE lower(username) = lower(?) AND role = 'admin' AND active = 1", username);
+    if (!user) return json(404, { error: 'Aucun compte responsable actif ne porte cet identifiant.' });
+    await current.db.run('UPDATE users SET password_hash = ?, reset_requested_at = NULL WHERE id = ?', hashPassword(password), user.id);
+    await current.db.run('DELETE FROM sessions WHERE user_id = ?', user.id);
+    return json(200, { status: 'reset' });
+  });
+}
+
 // ---------- Photos des produits (responsable) ----------
 // Elles ne vont pas dans la base : sur la plateforme, elles sont stockées comme fichiers de l'artefact
 // (sinon chaque commande renverrait toutes les photos) ; dans la démo, elles restent dans le navigateur.
@@ -337,13 +366,16 @@ async function handle(url, init = {}) {
   }
   const path = new URL(url, 'https://ice.local').pathname;
 
-  if (path === '/api/platform') return json(200, { mode: MODE, status });
+  if (path === '/api/platform') {
+    return json(200, { mode: MODE, status, ...(MODE === 'shared' && status === 'ready' ? { owner: await isLinkOwner() } : {}) });
+  }
   if (MODE === 'shared') {
     if (path === '/api/platform/setup' && method === 'POST') {
       return status === 'setup' ? setup(body) : json(409, { error: 'La plateforme est déjà configurée.' });
     }
     if (status !== 'ready') return json(503, UNAVAILABLE);
     if (reloading) await reloading;
+    if (path === '/api/platform/owner-reset' && method === 'POST') return ownerReset(body);
   }
   if (path === '/api/platform/backup' && method === 'GET') return backup();
   if (path === '/api/images' && method === 'POST') return uploadImage(body);
