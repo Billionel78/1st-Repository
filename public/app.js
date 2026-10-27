@@ -1425,7 +1425,7 @@ async function adminProducts(body, seq) {
   $('#pf', body).addEventListener('change', (e) => { productFilter.family = e.target.value; route(); });
   const familyOptions = families.map((f) => ({ value: f.id, label: f.name }));
   // `p` : produit à modifier. `model` : produit dupliqué, qui pré-remplit un nouveau produit.
-  const form = (p, model = p) => formModal({
+  const form = (p, model = p) => withStockTracking(formModal({
     title: p ? `Modifier « ${p.name} »` : model ? `Dupliquer « ${model.name} »` : 'Nouveau produit',
     fields: [
       { name: 'image', label: 'Photo', type: 'image', value: model?.image_url, hint: 'Photo du produit sur fond clair, de préférence. Elle est réduite automatiquement.' },
@@ -1436,7 +1436,10 @@ async function adminProducts(body, seq) {
       { name: 'cost_price', label: `Prix d’achat unitaire (${state.settings.currency})`, type: 'number', min: 0, value: model?.cost_price ?? 0, hint: 'Sert au calcul de la marge brute dans les statistiques.' },
       { name: 'available', label: 'Disponible à la vente', type: 'checkbox', value: model ? !!model.available : true },
       { name: 'track_stock', label: 'Activer le suivi du stock', type: 'checkbox', value: !!model?.track_stock },
-      ...(p ? [] : [{ name: 'stock', label: 'Stock initial', type: 'number', min: 0, value: 0, hint: 'Ensuite, utilisez l’écran Stock pour les entrées, pertes et inventaires.' }]),
+      p
+        ? { name: 'stock', label: 'Stock actuel (quantité en réserve)', type: 'number', min: 0, value: p.stock,
+          hint: 'Une modification est enregistrée comme « ajustement » dans l’historique du stock. Pour une livraison, une perte ou un inventaire, l’écran Stock garde le détail.' }
+        : { name: 'stock', label: 'Stock initial', type: 'number', min: 0, value: 0, hint: 'Ensuite, utilisez l’écran Stock pour les entrées, pertes et inventaires.' },
       { name: 'alert_threshold', label: 'Seuil d’alerte de stock bas', type: 'number', min: 0, value: model?.alert_threshold ?? 0, hint: 'Une alerte s’affiche quand le stock disponible atteint ce niveau.' },
     ],
     submitLabel: p ? 'Enregistrer' : 'Créer le produit',
@@ -1444,14 +1447,23 @@ async function adminProducts(body, seq) {
       const { image, ...fields } = v;
       const payload = { ...fields, family_id: Number(v.family_id) };
       payload.image_url = image.pending ? (await api('POST', '/api/images', { data: image.pending })).url : image.url;
+      // Stock : envoyé seulement s'il a changé (la correction est tracée côté serveur).
       if (!p) payload.stock = v.stock ?? 0;
+      else if (v.stock === undefined || v.stock === p.stock) delete payload.stock;
       for (const k of ['cost_price', 'alert_threshold']) if (payload[k] === undefined) payload[k] = 0;
       if (p) await api('PUT', `/api/products/${p.id}`, payload);
       else await api('POST', '/api/products', payload);
       toast(p ? 'Produit modifié.' : `Produit « ${v.name} » ajouté.`, 'ok');
       route();
     },
-  });
+  }));
+  // Saisir un stock active le suivi du stock (sinon il ne diminuerait pas à chaque vente).
+  function withStockTracking(modal) {
+    const stock = $('[name=stock]', modal);
+    const tracking = $('[name=track_stock]', modal);
+    stock?.addEventListener('input', () => { if (stock.value !== '' && tracking) tracking.checked = true; });
+    return modal;
+  }
   onActions(body, {
     add: () => form(null),
     edit: (id) => form(products.find((p) => p.id === id)),
