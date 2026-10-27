@@ -1,7 +1,7 @@
 'use strict';
 
 const { badRequest, notFound, conflict, toInt, toText } = require('../http');
-const { isIsoDate } = require('../time');
+const { isIsoDate, nowLocal } = require('../time');
 const { applyStockMovement } = require('../stock');
 
 const MAX_QTY = 1000;
@@ -35,6 +35,52 @@ module.exports = function orderRoutes(app, db, { requireAdmin, requireCustomer }
 
   function requireOpen(order) {
     if (order.status !== 'open') throw conflict('Cette commande est déjà clôturée.');
+  }
+
+  /**
+   * Commande modifiable : ouverte (tout le personnel) ou payée (responsable uniquement, correction).
+   * Une commande annulée ne se modifie plus.
+   */
+  function requireEditable(req, order) {
+    if (order.status === 'open') return;
+    if (order.status === 'paid' && req.user.role === 'admin') return;
+    if (order.status === 'paid') throw conflict('Seul le responsable peut modifier une commande déjà payée.');
+    throw conflict('Cette commande est annulée.');
+  }
+
+  /** Commande payée corrigée : le stock suit la variation de quantité (trace dans l'historique du stock). */
+  async function correctPaidStock(tx, order, productId, qtyDelta, now, userId) {
+    if (!qtyDelta) return;
+    const product = await tx.get('SELECT track_stock FROM products WHERE id = ?', productId);
+    if (!product?.track_stock) return;
+    await applyStockMovement(tx, {
+      productId, type: 'vente', delta: -qtyDelta, orderId: order.id, userId, at: now,
+      note: `Correction ${order.number}`,
+    });
+  }
+
+  /**
+   * Commande payée corrigée : les paiements suivent le nouveau total pour qu'elle reste soldée.
+   * Hausse : ajoutée au dernier paiement. Baisse : retirée des derniers paiements (supprimés à zéro).
+   */
+  async function settlePaidOrder(tx, orderId, now) {
+    const { total } = await tx.get('SELECT total FROM orders WHERE id = ?', orderId);
+    const payments = await tx.all('SELECT * FROM payments WHERE order_id = ? ORDER BY id DESC', orderId);
+    let diff = total - payments.reduce((sum, p) => sum + p.amount, 0);
+    for (const p of payments) {
+      if (diff === 0) break;
+      const amount = Math.max(0, p.amount + diff);
+      diff -= amount - p.amount;
+      if (amount === 0) {
+        await tx.run('DELETE FROM payments WHERE id = ?', p.id);
+      } else {
+        // Espèces : le montant reçu couvre au moins le montant, la monnaie rendue suit.
+        const received = p.method_type === 'cash' ? Math.max(p.received_amount ?? amount, amount) : p.received_amount;
+        await tx.run('UPDATE payments SET amount = ?, received_amount = ?, change_amount = ? WHERE id = ?',
+          amount, received, p.method_type === 'cash' ? received - amount : p.change_amount, p.id);
+      }
+    }
+    await tx.run('UPDATE orders SET paid_amount = total, updated_at = ? WHERE id = ?', now, orderId);
   }
 
   /** Rattrapage : on n'encaisse ni ne complète une commande d'une autre journée que celle rattrapée. */
@@ -197,23 +243,35 @@ module.exports = function orderRoutes(app, db, { requireAdmin, requireCustomer }
     const items = parseItems(req.body);
     await db.transaction(async (tx) => {
       const order = await requireOrder(id, tx);
-      requireOpen(order);
-      requireSameDay(req, order);
-      await addItems(tx, id, items, req.now);
+      requireEditable(req, order);
+      if (order.status === 'open') requireSameDay(req, order);
+      // Correction d'une commande payée : horodatée maintenant, pas à la date de la vente.
+      const now = order.status === 'paid' ? nowLocal() : req.now;
+      await addItems(tx, id, items, now);
+      if (order.status === 'paid') {
+        for (const { product_id: productId, quantity } of items) {
+          await correctPaidStock(tx, order, productId, quantity, now, req.user.id);
+        }
+        await settlePaidOrder(tx, id, now);
+      }
     });
     res.json(await loadOrder(id));
   });
 
-  // Correction d'une ligne (quantité 0 = suppression) tant que la commande est ouverte.
+  // Correction d'une ligne (quantité 0 = suppression) : commande ouverte, ou payée (responsable).
   app.patch('/api/orders/:id/items/:itemId', async (req, res) => {
     const id = toInt(req.params.id, 'id');
     const itemId = toInt(req.params.itemId, 'article');
     const quantity = toInt(req.body?.quantity, 'quantité', { min: 0, max: MAX_QTY });
     await db.transaction(async (tx) => {
       const order = await requireOrder(id, tx);
-      requireOpen(order);
+      requireEditable(req, order);
+      const paid = order.status === 'paid';
       const item = order.items.find((i) => i.id === itemId);
       if (!item) throw notFound('Article introuvable dans cette commande.');
+      if (paid && quantity === 0 && order.items.length === 1) {
+        throw conflict('Une commande payée doit garder au moins un article.');
+      }
       if (quantity > item.quantity) {
         const p = await tx.get('SELECT * FROM products WHERE id = ?', item.product_id);
         if (p?.track_stock) {
@@ -226,13 +284,71 @@ module.exports = function orderRoutes(app, db, { requireAdmin, requireCustomer }
         }
       }
       const newTotal = order.total - item.amount + item.unit_price * quantity;
-      if (newTotal < order.paid_amount) {
+      if (!paid && newTotal < order.paid_amount) {
         throw conflict('Impossible : le total deviendrait inférieur au montant déjà payé.');
       }
-      const now = req.now;
+      const now = paid ? nowLocal() : req.now;
       if (quantity === 0) await tx.run('DELETE FROM order_items WHERE id = ?', itemId);
       else await tx.run('UPDATE order_items SET quantity = ?, updated_at = ? WHERE id = ?', quantity, now, itemId);
       await recomputeTotal(tx, id, now);
+      if (paid) {
+        await correctPaidStock(tx, order, item.product_id, quantity - item.quantity, now, req.user.id);
+        await settlePaidOrder(tx, id, now);
+      }
+    });
+    res.json(await loadOrder(id));
+  });
+
+  /**
+   * Date et heure de la vente (responsable) : toute la commande est déplacée — ouverture, paiements,
+   * clôture et sorties de stock liées gardent leur heure sur le nouveau jour — et renumérotée pour ce jour.
+   */
+  app.put('/api/orders/:id/date', requireAdmin, async (req, res) => {
+    const id = toInt(req.params.id, 'id');
+    const date = String(req.body?.date ?? '');
+    const time = String(req.body?.time ?? '');
+    if (!isIsoDate(date)) throw badRequest('Date invalide.');
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw badRequest('Heure invalide (format HH:MM).');
+    const created = `${date} ${time}:00`;
+    if (created > nowLocal()) throw badRequest('La date de vente ne peut pas être dans le futur.');
+    await db.transaction(async (tx) => {
+      const order = await requireOrder(id, tx);
+      if (order.status === 'cancelled') throw conflict('Cette commande est annulée.');
+      // Même heure, nouveau jour, jamais avant l'ouverture de la commande.
+      const moved = (stamp) => {
+        const value = `${date} ${stamp.slice(11)}`;
+        return value < created ? created : value;
+      };
+      const number = date === order.created_at.slice(0, 10) ? order.number : await nextOrderNumber(tx, created);
+      await tx.run('UPDATE orders SET number = ?, created_at = ?, closed_at = ?, updated_at = ? WHERE id = ?',
+        number, created, order.closed_at ? moved(order.closed_at) : null, nowLocal(), id);
+      for (const p of order.payments) await tx.run('UPDATE payments SET created_at = ? WHERE id = ?', moved(p.created_at), p.id);
+      // Sorties de stock de la vente (pas les corrections faites après coup).
+      const moves = await tx.all("SELECT id, created_at FROM stock_movements WHERE order_id = ? AND note IS NULL", id);
+      for (const m of moves) await tx.run('UPDATE stock_movements SET created_at = ? WHERE id = ?', moved(m.created_at), m.id);
+      for (const item of order.items) {
+        await tx.run('UPDATE order_items SET created_at = ? WHERE id = ?', moved(item.created_at), item.id);
+      }
+    });
+    res.json(await loadOrder(id));
+  });
+
+  // Mode de paiement d'un encaissement déjà fait (responsable) : correction d'une erreur de saisie.
+  app.put('/api/orders/:id/payments/:paymentId', requireAdmin, async (req, res) => {
+    const id = toInt(req.params.id, 'id');
+    const paymentId = toInt(req.params.paymentId, 'paiement');
+    const methodId = toInt(req.body?.method_id, 'mode de paiement', { min: 1 });
+    await db.transaction(async (tx) => {
+      const payment = await tx.get('SELECT * FROM payments WHERE id = ? AND order_id = ?', paymentId, id);
+      if (!payment) throw notFound('Paiement introuvable.');
+      const method = await tx.get('SELECT * FROM payment_methods WHERE id = ? AND archived = 0', methodId);
+      if (!method) throw badRequest('Mode de paiement introuvable.');
+      const cash = method.type === 'cash';
+      await tx.run(`UPDATE payments SET method_id = ?, method_name = ?, method_type = ?, received_amount = ?,
+        change_amount = ?, reference = ? WHERE id = ?`,
+        method.id, method.name, method.type, cash ? (payment.method_type === 'cash' ? payment.received_amount : payment.amount) : null,
+        cash ? (payment.method_type === 'cash' ? payment.change_amount : 0) : null,
+        cash ? null : payment.reference, paymentId);
     });
     res.json(await loadOrder(id));
   });

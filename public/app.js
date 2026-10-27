@@ -1028,13 +1028,17 @@ async function renderOrder(id, seq) {
   if (seq !== renderSeq) return;
   const view = $('#view');
   const open = order.status === 'open';
+  // Le responsable corrige aussi une commande déjà payée (paiement et stock ajustés automatiquement).
+  const paidEdit = order.status === 'paid' && isAdmin();
+  const editable = open || paidEdit;
   view.innerHTML = `
     <div class="page-head">
       <div class="row">
         <a class="btn btn-icon" href="${open ? '#/commandes' : '#/historique'}" aria-label="Retour">←</a>
         <div><h1>${esc(order.table_name)} · ${esc(order.number)}</h1>
           <div class="muted small">Ouverte le ${fmtDateTime(order.created_at)}${order.created_by_name ? ` par ${esc(order.created_by_name)}` : ''}
-          ${order.closed_at ? ` · ${order.status === 'paid' ? 'Payée' : 'Annulée'} le ${fmtDateTime(order.closed_at)}` : ''}</div>
+          ${order.closed_at ? ` · ${order.status === 'paid' ? 'Payée' : 'Annulée'} le ${fmtDateTime(order.closed_at)}` : ''}
+          ${isAdmin() && order.status !== 'cancelled' ? '<button class="btn btn-sm btn-ghost" type="button" id="date-btn">✏️ Modifier la date</button>' : ''}</div>
           <div class="order-customer-line">${order.customer_id
             ? `👤 Client : <a href="#/client/${order.customer_id}">${esc(order.customer_name)}</a>`
             : order.customer_name ? `👤 Client : ${esc(order.customer_name)}` : '<span class="muted">Aucun client</span>'}
@@ -1044,6 +1048,8 @@ async function renderOrder(id, seq) {
       <div>${statusBadge(order.status)}</div>
     </div>
     ${order.cancel_reason ? `<div class="banner">Motif d'annulation : ${esc(order.cancel_reason)}</div>` : ''}
+    ${paidEdit ? `<div class="banner banner-warn">✏️ Commande payée : vous pouvez la corriger (quantités, articles, mode de paiement).
+      Le paiement et le stock sont ajustés automatiquement.</div>` : ''}
     <div class="detail-layout">
       <div>
         <div class="table-wrap"><table class="data">
@@ -1051,7 +1057,7 @@ async function renderOrder(id, seq) {
           <tbody>${order.items.length ? order.items.map((i) => `<tr>
             <td><strong>${esc(i.product_name)}</strong><br><span class="muted small">${esc(i.family_name)}</span></td>
             <td class="right num">${money(i.unit_price)}</td>
-            <td class="right">${open ? `<span class="qty-ctl">
+            <td class="right">${editable ? `<span class="qty-ctl">
                 <button class="btn" type="button" data-item="${i.id}" data-delta="-1" aria-label="Retirer un">−</button>
                 <span>${i.quantity}</span>
                 <button class="btn" type="button" data-item="${i.id}" data-delta="1" aria-label="Ajouter un">+</button></span>`
@@ -1072,7 +1078,9 @@ async function renderOrder(id, seq) {
           <button class="btn btn-block" id="transfer-btn">🔀 Changer de table</button>
           <button class="btn btn-block" id="print-btn" ${order.items.length ? '' : 'disabled'}>🖨️ Imprimer l’addition</button>
           ${isAdmin() && order.paid_amount === 0 ? '<button class="btn btn-danger btn-block" id="cancel-btn">Annuler la commande</button>' : ''}
-        </div>` : order.status === 'paid' ? '<div class="card"><button class="btn btn-block" id="print-btn">🖨️ Imprimer le reçu</button></div>' : ''}
+        </div>` : order.status === 'paid' ? `<div class="card grid">
+          ${paidEdit ? '<button class="btn btn-primary btn-block" id="add-paid-btn">＋ Ajouter un article</button>' : ''}
+          <button class="btn btn-block" id="print-btn">🖨️ Imprimer le reçu</button></div>` : ''}
         <div class="card">
           <h3>Paiements</h3>
           ${order.payments.length ? `<div class="grid" style="margin-top:.7rem">${order.payments.map((p) => `
@@ -1082,6 +1090,7 @@ async function renderOrder(id, seq) {
                 ${p.reference ? ` · Réf. ${esc(p.reference)}` : ''}
                 ${p.change_amount ? ` · Reçu ${money(p.received_amount)}, rendu ${money(p.change_amount)}` : ''}</span></div>
               <span class="spacer"></span><strong class="num">${money(p.amount)}</strong>
+              ${isAdmin() ? `<button class="btn btn-sm" type="button" data-payment="${p.id}">Changer le mode</button>` : ''}
             </div>`).join('')}</div>` : '<p class="muted">Aucun paiement enregistré.</p>'}
         </div>
       </div>
@@ -1092,9 +1101,15 @@ async function renderOrder(id, seq) {
     const quantity = item.quantity + Number(b.dataset.delta);
     if (quantity === 0 && !(await confirmModal('Retirer l’article', `Retirer « ${esc(item.product_name)} » de la commande ?`, { confirmLabel: 'Retirer', danger: true }))) return;
     try {
-      await api('PATCH', `/api/orders/${order.id}/items/${item.id}`, { quantity });
+      const updated = await api('PATCH', `/api/orders/${order.id}/items/${item.id}`, { quantity });
+      if (paidEdit) toast(`Commande corrigée : nouveau total ${money(updated.total)}, paiement ajusté.`, 'ok');
       route();
     } catch (err) { toast(err.message, 'err'); }
+  }));
+  $('#date-btn', view)?.addEventListener('click', () => openOrderDateModal(order));
+  $('#add-paid-btn', view)?.addEventListener('click', () => openAddToPaidOrderModal(order));
+  $$('[data-payment]', view).forEach((b) => b.addEventListener('click', () => {
+    openPaymentMethodModal(order, order.payments.find((p) => p.id === Number(b.dataset.payment)));
   }));
   $('#pay-btn', view)?.addEventListener('click', () => openPaymentModal(order));
   $('#add-btn', view)?.addEventListener('click', () => {
@@ -1115,6 +1130,64 @@ async function renderOrder(id, seq) {
       route();
     },
   }));
+}
+
+/** Date et heure de la vente (responsable) : toute la commande est déplacée et renumérotée pour ce jour. */
+function openOrderDateModal(order) {
+  formModal({
+    title: `Date de la vente ${order.number}`,
+    fields: [
+      { name: 'date', label: 'Date', type: 'date', required: true, value: order.created_at.slice(0, 10), max: isoDate() },
+      { name: 'time', label: 'Heure', type: 'time', required: true, value: order.created_at.slice(11, 16),
+        hint: 'Les paiements, la clôture et les sorties de stock de la commande passent au même jour. Si le jour change, la commande reçoit un numéro de ce jour.' },
+    ],
+    submitLabel: 'Enregistrer la date',
+    onSubmit: async (v) => {
+      const updated = await api('PUT', `/api/orders/${order.id}/date`, { date: v.date, time: v.time });
+      toast(`Vente déplacée au ${fmtDateTime(updated.created_at)}${updated.number !== order.number ? ` (nouveau n° ${updated.number})` : ''}.`, 'ok');
+      route();
+    },
+  });
+}
+
+/** Ajouter un article à une commande déjà payée (responsable). */
+async function openAddToPaidOrderModal(order) {
+  let products;
+  try { products = await api('GET', '/api/products'); } catch (err) { toast(err.message, 'err'); return; }
+  const available = products.filter((p) => p.available);
+  if (!available.length) { toast('Aucun produit disponible.', 'err'); return; }
+  formModal({
+    title: `Ajouter un article · ${order.number}`,
+    fields: [
+      { name: 'product_id', label: 'Produit', type: 'select', value: available[0].id,
+        options: available.map((p) => ({ value: p.id, label: `${p.family_name} — ${p.name}${p.format ? ` (${p.format})` : ''} · ${money(p.price)}` })) },
+      { name: 'quantity', label: 'Quantité', type: 'number', min: 1, required: true, value: 1,
+        hint: 'La commande reste payée : le montant du paiement est augmenté d’autant et le stock est mis à jour.' },
+    ],
+    submitLabel: 'Ajouter',
+    onSubmit: async (v) => {
+      const updated = await api('POST', `/api/orders/${order.id}/items`, { product_id: Number(v.product_id), quantity: v.quantity });
+      toast(`Article ajouté : nouveau total ${money(updated.total)}, paiement ajusté.`, 'ok');
+      route();
+    },
+  });
+}
+
+/** Corriger le mode de paiement d'un encaissement (responsable). */
+async function openPaymentMethodModal(order, payment) {
+  let methods;
+  try { methods = await api('GET', '/api/payment-methods'); } catch (err) { toast(err.message, 'err'); return; }
+  formModal({
+    title: `Mode de paiement · ${money(payment.amount)}`,
+    fields: [{ name: 'method_id', label: 'Mode de paiement', type: 'select', value: payment.method_id,
+      options: methods.map((m) => ({ value: m.id, label: `${m.name} (${METHOD_TYPES[m.type]})` })),
+      hint: 'Le montant ne change pas ; seuls le mode et sa catégorie (espèces, Mobile Money…) sont corrigés.' }],
+    onSubmit: async (v) => {
+      await api('PUT', `/api/orders/${order.id}/payments/${payment.id}`, { method_id: Number(v.method_id) });
+      toast('Mode de paiement corrigé.', 'ok');
+      route();
+    },
+  });
 }
 
 /** Ticket au format caisse (80 mm) : addition si la commande est ouverte, reçu si elle est payée. */

@@ -97,6 +97,19 @@ annulation (responsable, si aucun paiement), vue des tables libres/occupées, hi
 statistiques par jour ou par période (aujourd'hui, hier, 7 jours, mois, dates libres), impression
 de l'**addition** (commande ouverte) ou du **reçu** (commande payée) au format ticket de caisse 80 mm.
 
+### Corrections par le responsable
+
+Dans le détail d'une commande, le responsable peut :
+
+- **modifier la date et l'heure de la vente** : ouverture, paiements, clôture et sorties de stock liées
+  passent au nouveau jour (même heure, jamais avant l'ouverture) ; si le jour change, la commande reçoit
+  un numéro de ce jour ; date future refusée ;
+- **corriger une commande déjà payée** : quantités (− / +), retrait ou ajout d'articles. La commande reste
+  payée : le paiement suit le nouveau total (hausse sur le dernier paiement, baisse retirée des derniers
+  paiements ; en espèces, la monnaie rendue est recalculée) et le stock est corrigé (mouvement
+  « Correction CMD-… »). Une commande payée garde au moins un article ;
+- **changer le mode de paiement** d'un encaissement (erreur de saisie), sans changer son montant.
+
 ### Clients
 
 Écran **Clients** (tout le personnel) : fiche avec nom, téléphone, notes et **table habituelle** ; visites,

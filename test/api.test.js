@@ -353,4 +353,73 @@ for (const backend of BACKENDS) describe(backend.name, () => {
     assert.equal((await admin('GET', `/api/orders/${o.id}`)).data.customer_name, 'Koffi');
     assert.equal((await waiter('POST', '/api/orders', { table_id: t3.id, product_id: castle.id, quantity: 1, customer_id: koffi.data.id })).status, 400);
   });
+
+  test('responsable : corriger une commande payée et changer la date de vente', async () => {
+    const day = (offset) => {
+      const d = new Date();
+      d.setDate(d.getDate() + offset);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    };
+    const t6 = await table('Table 6');
+    const flag = await product('Flag');
+    const vox = await product('Vox 66');
+    await admin('PUT', `/api/products/${flag.id}`, { track_stock: true, stock: 50 });
+    const methods = (await admin('GET', '/api/payment-methods')).data;
+    const cash = methods.find((m) => m.type === 'cash');
+    const wave = methods.find((m) => m.name === 'Wave');
+
+    // Vente payée : 4 Flag, payée en espèces (reçu 5000).
+    const o = (await waiter('POST', '/api/orders', { table_id: t6.id, product_id: flag.id, quantity: 4 })).data.order;
+    await waiter('POST', `/api/orders/${o.id}/payments`, { method_id: cash.id, received_amount: 5000 });
+    const stockOf = async () => (await product('Flag')).stock;
+    assert.equal(await stockOf(), 46);
+    const line = (await admin('GET', `/api/orders/${o.id}`)).data.items[0];
+
+    // Un serveur ne peut pas corriger une commande payée.
+    assert.equal((await waiter('PATCH', `/api/orders/${o.id}/items/${line.id}`, { quantity: 3 })).status, 409);
+
+    // Baisse : 3 Flag → total, paiement et stock suivent ; la commande reste payée.
+    let r = (await admin('PATCH', `/api/orders/${o.id}/items/${line.id}`, { quantity: 3 })).data;
+    assert.equal(r.status, 'paid');
+    assert.equal(r.total, 3 * flag.price);
+    assert.equal(r.paid_amount, r.total);
+    assert.equal(r.payments[0].amount, 3 * flag.price);
+    assert.equal(r.payments[0].change_amount, 5000 - 3 * flag.price);
+    assert.equal(await stockOf(), 47);
+
+    // Ajout d'un article après coup.
+    r = (await admin('POST', `/api/orders/${o.id}/items`, { product_id: vox.id, quantity: 2 })).data;
+    assert.equal(r.status, 'paid');
+    assert.equal(r.total, 3 * flag.price + 2 * vox.price);
+    assert.equal(r.paid_amount, r.total);
+    assert.equal(r.payments.reduce((a, p) => a + p.amount, 0), r.total);
+
+    // Le dernier article ne peut pas être retiré ; les autres oui.
+    const voxLine = r.items.find((i) => i.product_id === vox.id);
+    r = (await admin('PATCH', `/api/orders/${o.id}/items/${voxLine.id}`, { quantity: 0 })).data;
+    assert.equal(r.items.length, 1);
+    assert.equal((await admin('PATCH', `/api/orders/${o.id}/items/${line.id}`, { quantity: 0 })).status, 409);
+
+    // Mode de paiement corrigé : espèces → Wave.
+    r = (await admin('PUT', `/api/orders/${o.id}/payments/${r.payments[0].id}`, { method_id: wave.id })).data;
+    assert.equal(r.payments[0].method_name, 'Wave');
+    assert.equal(r.payments[0].change_amount, null);
+    assert.equal((await waiter('PUT', `/api/orders/${o.id}/payments/${r.payments[0].id}`, { method_id: cash.id })).status, 403);
+
+    // Date de vente : déplacée de 2 jours, renumérotée, paiements et stock suivent.
+    const past = day(-2);
+    assert.equal((await waiter('PUT', `/api/orders/${o.id}/date`, { date: past, time: '20:15' })).status, 403);
+    assert.equal((await admin('PUT', `/api/orders/${o.id}/date`, { date: day(1), time: '10:00' })).status, 400);
+    assert.equal((await admin('PUT', `/api/orders/${o.id}/date`, { date: past, time: '25:00' })).status, 400);
+    r = (await admin('PUT', `/api/orders/${o.id}/date`, { date: past, time: '20:15' })).data;
+    assert.equal(r.created_at, `${past} 20:15:00`);
+    assert.match(r.number, new RegExp(`^CMD-${past.replaceAll('-', '')}-\\d{4}$`));
+    assert.ok(r.closed_at.startsWith(past) && r.closed_at >= r.created_at);
+    assert.ok(r.payments.every((p) => p.created_at.startsWith(past)));
+    const moves = (await admin('GET', `/api/stock/movements?product_id=${flag.id}`)).data.filter((m) => m.order_id === o.id);
+    assert.ok(moves.some((m) => m.note === null && m.created_at.startsWith(past)));
+    const stats = (await admin('GET', `/api/stats?date=${past}`)).data;
+    assert.ok(stats.products.some((p) => p.product_name === 'Flag' && p.quantity === 3));
+    assert.ok(!(await admin('GET', `/api/orders?date=${day(0)}`)).data.some((x) => x.id === o.id));
+  });
 });
