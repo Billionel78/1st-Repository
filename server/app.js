@@ -45,7 +45,7 @@ function createApp(db, { secureCookies = false, trustProxy = 'loopback' } = {}) 
     });
     next();
   });
-  app.use(express.json({ limit: '100kb' }));
+  app.use(express.json({ limit: '2mb' })); // photos des produits
 
   // ---------- Première ouverture : création de l'établissement ----------
   app.get('/api/platform', async (req, res) => {

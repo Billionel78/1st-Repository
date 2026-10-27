@@ -284,6 +284,33 @@ async function restore(body) {
   });
 }
 
+// ---------- Photos des produits (responsable) ----------
+// Elles ne vont pas dans la base : sur la plateforme, elles sont stockées comme fichiers de l'artefact
+// (sinon chaque commande renverrait toutes les photos) ; dans la démo, elles restent dans le navigateur.
+async function uploadImage(body) {
+  const user = await currentUser();
+  if (user?.role !== 'admin') return json(403, { error: 'Action réservée au responsable.' });
+  const m = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(String(body?.data ?? ''));
+  if (!m || m[2].length > 1_400_000) return json(400, { error: 'Image invalide ou trop lourde.' });
+  if (MODE === 'demo') return json(201, { url: body.data });
+
+  const assets = globalThis.claude?.use ? await globalThis.claude.use('assets') : null;
+  if (!assets) {
+    return json(403, { error: 'Seuls le propriétaire de la plateforme et ses éditeurs peuvent ajouter des photos.' });
+  }
+  try {
+    const asset = await assets.upload(new Blob([fromBase64(m[2])], { type: m[1] }), { type: m[1] });
+    return json(201, { url: `/_blob/${asset.id}` });
+  } catch (err) {
+    const messages = {
+      too_large: 'Image trop lourde.',
+      quota_or_state: 'L’espace réservé aux photos est plein : retirez des photos inutilisées.',
+      rate_limited: 'Trop d’envois rapprochés : réessayez dans un instant.',
+    };
+    return json(err?.code === 'too_large' ? 413 : 503, { error: messages[err?.code] || 'Envoi de la photo impossible. Réessayez.' });
+  }
+}
+
 // ---------- Point d'entrée ----------
 const ready = (async () => {
   globalThis.__SQL = await globalThis.initSqlJs({ wasmBinary: fromBase64(globalThis.__SQL_WASM_B64) });
@@ -319,6 +346,7 @@ async function handle(url, init = {}) {
     if (reloading) await reloading;
   }
   if (path === '/api/platform/backup' && method === 'GET') return backup();
+  if (path === '/api/images' && method === 'POST') return uploadImage(body);
   if (path === '/api/platform/restore' && method === 'POST') return restore(body);
 
   if (MODE === 'shared' && method !== 'GET') return sharedWrite(method, url, body);

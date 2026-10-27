@@ -125,9 +125,57 @@ function confirmModal(title, message, { confirmLabel = 'Confirmer', danger = fal
  * Formulaire générique dans une modale.
  * fields: [{ name, label, type: text|number|password|select|checkbox|color, value, options, required, min, hint }]
  */
+/**
+ * Réduit une photo (600 px maximum) et la convertit en « data URL » WebP, ou JPEG si le navigateur
+ * ne sait pas produire de WebP : une photo de téléphone passe de plusieurs Mo à quelques dizaines de Ko.
+ */
+async function resizeImage(file, max = 600) {
+  if (!/^image\//.test(file.type)) throw new Error('Choisissez un fichier image (JPEG, PNG, WebP…).');
+  // Lecture en « data URL » : autorisée par la politique de sécurité des pages (contrairement à blob:).
+  const source = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Impossible de lire cette image.'));
+    reader.readAsDataURL(file);
+  });
+  const img = await new Promise((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error('Impossible de lire cette image.'));
+    el.src = source;
+  });
+  const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  const webp = canvas.toDataURL('image/webp', 0.85);
+  if (webp.startsWith('data:image/webp')) return webp;
+  // JPEG sans transparence : fond blanc.
+  ctx.globalCompositeOperation = 'destination-over';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.85);
+}
+
 function formModal({ title, fields, submitLabel = 'Enregistrer', onSubmit }) {
   const fieldHtml = (f) => {
     const id = `f-${f.name}`;
+    if (f.type === 'image') {
+      return `<div class="image-field" data-image-field="${f.name}">
+        <span class="field-label">${esc(f.label)}</span>
+        <div class="image-field-row">
+          <div class="image-preview" aria-live="polite">${f.value ? `<img src="${esc(f.value)}" alt="">` : '<span aria-hidden="true">📷</span>'}</div>
+          <div class="image-actions">
+            <label class="btn btn-sm" for="${id}">${f.value ? 'Changer la photo' : 'Choisir une photo'}</label>
+            <input type="file" id="${id}" accept="image/*" hidden>
+            <button type="button" class="btn btn-sm btn-ghost" data-image-clear ${f.value ? '' : 'hidden'}>Retirer la photo</button>
+            ${f.hint ? `<span class="muted small">${esc(f.hint)}</span>` : ''}
+          </div>
+        </div>
+      </div>`;
+    }
     if (f.type === 'checkbox') {
       return `<label class="check"><input type="checkbox" id="${id}" name="${f.name}" ${f.value ? 'checked' : ''}> ${esc(f.label)}</label>`;
     }
@@ -150,10 +198,46 @@ function formModal({ title, fields, submitLabel = 'Enregistrer', onSubmit }) {
            <button class="btn btn-primary" type="submit" form="modal-form">${esc(submitLabel)}</button>`,
   });
   const form = $('#modal-form', modal);
+  // Champs photo : { url } = photo actuelle (ou null), { pending } = nouvelle photo à envoyer.
+  const images = {};
+  for (const f of fields.filter((x) => x.type === 'image')) {
+    const box = $(`[data-image-field="${f.name}"]`, form);
+    const photo = { url: f.value || null, pending: null };
+    images[f.name] = photo;
+    const preview = $('.image-preview', box);
+    const clear = $('[data-image-clear]', box);
+    const label = $('label.btn', box);
+    const show = (src) => {
+      preview.innerHTML = src ? `<img src="${esc(src)}" alt="">` : '<span aria-hidden="true">📷</span>';
+      clear.hidden = !src;
+      label.textContent = src ? 'Changer la photo' : 'Choisir une photo';
+    };
+    $('input[type=file]', box).addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      e.target.value = '';
+      if (!file) return;
+      try {
+        photo.pending = await resizeImage(file);
+        show(photo.pending);
+        $('#modal-error', modal).textContent = '';
+      } catch (err) {
+        $('#modal-error', modal).textContent = err.message;
+      }
+    });
+    clear.addEventListener('click', () => {
+      photo.url = null;
+      photo.pending = null;
+      show(null);
+    });
+  }
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const values = {};
     for (const f of fields) {
+      if (f.type === 'image') {
+        values[f.name] = { ...images[f.name] };
+        continue;
+      }
       const input = form.elements[f.name];
       if (f.type === 'checkbox') values[f.name] = input.checked;
       else if (f.type === 'number') values[f.name] = input.value === '' ? undefined : Number(input.value);
@@ -174,7 +258,7 @@ function formModal({ title, fields, submitLabel = 'Enregistrer', onSubmit }) {
       btn.disabled = false;
     }
   });
-  setTimeout(() => form.querySelector('input:not([type=checkbox]), select')?.focus(), 30);
+  setTimeout(() => form.querySelector('input:not([type=checkbox]):not([type=file]), select')?.focus(), 30);
   return modal;
 }
 
@@ -465,6 +549,21 @@ async function renderHome(m, seq) {
 /* =====================================================================
  * Famille → produits → table → quantité → validation
  * ===================================================================== */
+// Photo introuvable (supprimée, hors ligne) : on affiche une icône à la place d'une image cassée.
+document.addEventListener('error', (e) => {
+  const img = e.target;
+  if (img.tagName === 'IMG' && img.closest('.product-photo, .thumb, .image-preview')) {
+    img.replaceWith(Object.assign(document.createElement('span'), { className: 'product-photo-icon', textContent: '📷' }));
+  }
+}, true);
+
+/** Photo d'un produit, ou l'icône de sa famille quand il n'en a pas. */
+function productPhoto(p, fallbackIcon = '🍹') {
+  return p.image_url
+    ? `<img src="${esc(p.image_url)}" alt="" loading="lazy">`
+    : `<span class="product-photo-icon" aria-hidden="true">${esc(fallbackIcon)}</span>`;
+}
+
 async function renderFamily(familyId, seq) {
   const [families, products] = await Promise.all([
     api('GET', '/api/families'),
@@ -488,9 +587,11 @@ async function renderFamily(familyId, seq) {
       const free = p.track_stock ? p.stock - p.reserved : null;
       const disabled = !p.available || (free !== null && free <= 0);
       return `<button class="tile tile-product ${disabled ? 'disabled' : ''}" type="button" data-id="${p.id}" ${disabled ? 'aria-disabled="true"' : ''}>
-        ${free !== null ? `<span class="badge tile-stock ${free <= 5 ? 'badge-open' : ''}">Stock : ${free}</span>` : ''}
+        <span class="product-photo">${productPhoto(p, family.icon)}
+          ${free !== null ? `<span class="badge tile-stock ${free <= 5 ? 'badge-open' : ''}">Stock : ${free}</span>` : ''}</span>
         <span class="tile-name">${esc(p.name)}</span>
-        <span>${!p.available ? '<span class="badge badge-cancelled">Indisponible</span>'
+        ${p.format ? `<span class="tile-format">Format : ${esc(p.format)}</span>` : ''}
+        <span class="tile-bottom">${!p.available ? '<span class="badge badge-cancelled">Indisponible</span>'
           : free !== null && free <= 0 ? '<span class="badge badge-cancelled">Rupture</span>'
           : `<span class="tile-price">${money(p.price)}</span>`}</span>
       </button>`;
@@ -1307,7 +1408,8 @@ async function adminProducts(body, seq) {
     ${list.length ? `<div class="table-wrap"><table class="data">
       <thead><tr><th>Produit</th><th>Famille</th><th class="right">Prix de vente</th><th class="right">Prix d’achat</th><th class="right">Stock</th><th>Disponibilité</th><th class="right">Actions</th></tr></thead>
       <tbody>${list.map((p) => `<tr>
-        <td><strong>${esc(p.name)}</strong></td>
+        <td><div class="product-cell"><span class="thumb">${productPhoto(p, '📦')}</span>
+          <span><strong>${esc(p.name)}</strong>${p.format ? `<br><span class="muted small">${esc(p.format)}</span>` : ''}</span></div></td>
         <td>${esc(p.family_name)}</td>
         <td class="right num">${money(p.price)}</td>
         <td class="right num">${p.cost_price ? money(p.cost_price) : '<span class="muted">—</span>'}</td>
@@ -1326,7 +1428,9 @@ async function adminProducts(body, seq) {
   const form = (p, model = p) => formModal({
     title: p ? `Modifier « ${p.name} »` : model ? `Dupliquer « ${model.name} »` : 'Nouveau produit',
     fields: [
+      { name: 'image', label: 'Photo', type: 'image', value: model?.image_url, hint: 'Photo du produit sur fond clair, de préférence. Elle est réduite automatiquement.' },
       { name: 'name', label: 'Nom du produit', required: true, value: p ? p.name : model ? `${model.name} (copie)` : '', maxlength: 80 },
+      { name: 'format', label: 'Format / contenance (facultatif)', value: model?.format, placeholder: 'Ex. : 65 cl', maxlength: 30 },
       { name: 'family_id', label: 'Famille', type: 'select', options: familyOptions, value: model?.family_id ?? (productFilter.family || families[0]?.id) },
       { name: 'price', label: `Prix de vente unitaire (${state.settings.currency})`, type: 'number', min: 0, required: true, value: model?.price },
       { name: 'cost_price', label: `Prix d’achat unitaire (${state.settings.currency})`, type: 'number', min: 0, value: model?.cost_price ?? 0, hint: 'Sert au calcul de la marge brute dans les statistiques.' },
@@ -1337,7 +1441,9 @@ async function adminProducts(body, seq) {
     ],
     submitLabel: p ? 'Enregistrer' : 'Créer le produit',
     onSubmit: async (v) => {
-      const payload = { ...v, family_id: Number(v.family_id) };
+      const { image, ...fields } = v;
+      const payload = { ...fields, family_id: Number(v.family_id) };
+      payload.image_url = image.pending ? (await api('POST', '/api/images', { data: image.pending })).url : image.url;
       if (!p) payload.stock = v.stock ?? 0;
       for (const k of ['cost_price', 'alert_threshold']) if (payload[k] === undefined) payload[k] = 0;
       if (p) await api('PUT', `/api/products/${p.id}`, payload);

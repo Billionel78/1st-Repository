@@ -22,8 +22,9 @@ for (const backend of BACKENDS) describe(backend.name, () => {
       });
       const setCookie = res.headers.get('set-cookie');
       if (setCookie) cookie = setCookie.split(';')[0];
-      const data = await res.json();
-      return { status: res.status, data };
+      const type = res.headers.get('content-type') || '';
+      const data = type.includes('json') ? await res.json() : Buffer.from(await res.arrayBuffer());
+      return { status: res.status, data, type };
     };
   }
 
@@ -209,5 +210,40 @@ for (const backend of BACKENDS) describe(backend.name, () => {
     const me = (await admin('GET', '/api/auth/me')).data.user;
     const res = await admin('PUT', `/api/users/${me.id}`, { role: 'serveur' });
     assert.equal(res.status, 409);
+  });
+
+  test('photos et format des produits', async () => {
+    // PNG 1×1 pixel.
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+    assert.equal((await waiter('POST', '/api/images', { data: `data:image/png;base64,${png}` })).status, 403);
+    assert.equal((await admin('POST', '/api/images', { data: 'data:text/html;base64,PGI+' })).status, 400);
+    const up = await admin('POST', '/api/images', { data: `data:image/png;base64,${png}` });
+    assert.equal(up.status, 201);
+    assert.match(up.data.url, /^\/api\/images\/\d+$/);
+    const img = await waiter('GET', up.data.url);
+    assert.equal(img.status, 200);
+    assert.equal(img.type, 'image/png');
+    assert.equal(img.data.toString('base64'), png);
+
+    const fam = (await admin('GET', '/api/families')).data[0];
+    const a = (await admin('POST', '/api/products', {
+      family_id: fam.id, name: 'Beaufort 50cl', format: '50 cl', price: 700, image_url: up.data.url,
+    })).data;
+    assert.equal(a.format, '50 cl');
+    assert.equal(a.image_url, up.data.url);
+    assert.equal((await admin('POST', '/api/products', { family_id: fam.id, name: 'X', price: 1, image_url: 'https://exemple.com/a.png' })).status, 400);
+    // Copie (bouton Dupliquer) : même photo.
+    const b = (await admin('POST', '/api/products', { family_id: fam.id, name: 'Beaufort 65cl', price: 900, image_url: up.data.url })).data;
+    // Nouvelle photo sur A : l'ancienne est conservée car B l'utilise encore.
+    const up2 = (await admin('POST', '/api/images', { data: `data:image/png;base64,${png}` })).data;
+    await admin('PUT', `/api/products/${a.id}`, { image_url: up2.url, format: '' });
+    const a2 = (await admin('GET', '/api/products')).data.find((p) => p.id === a.id);
+    assert.equal(a2.image_url, up2.url);
+    assert.equal(a2.format, null);
+    assert.equal((await admin('GET', up.data.url)).status, 200);
+    // Photo retirée de B : plus personne ne l'utilise, elle est supprimée.
+    await admin('PUT', `/api/products/${b.id}`, { image_url: null });
+    assert.equal((await admin('GET', up.data.url)).status, 404);
+    assert.equal((await admin('GET', up2.url)).status, 200);
   });
 });

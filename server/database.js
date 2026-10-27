@@ -15,6 +15,7 @@
 // Tables dont la clé « id » est renvoyée après un INSERT (lastInsertRowid).
 const ID_TABLES = new Set([
   'users', 'families', 'products', 'bar_tables', 'payment_methods', 'orders', 'order_items', 'payments', 'stock_movements',
+  'images',
 ]);
 
 /** File d'attente asynchrone : une seule section critique à la fois. */

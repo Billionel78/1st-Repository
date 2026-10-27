@@ -6,6 +6,35 @@ const { applyStockMovement } = require('../stock');
 
 const MAX_PRICE = 100_000_000;
 const MAX_STOCK = 1_000_000;
+const MAX_IMAGE_BYTES = 1_000_000;
+const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+// Photo d'un produit : image du serveur, fichier de l'artefact claude.ai, ou image intégrée (démo).
+const IMAGE_URL = /^(\/api\/images\/\d+|\/_blob\/[0-9a-f]{32}|data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+)$/;
+
+/** Décode une image transmise en « data URL ». */
+function decodeImage(value) {
+  const m = /^data:(image\/[a-z]+);base64,([A-Za-z0-9+/=]+)$/.exec(typeof value === 'string' ? value : '');
+  if (!m || !IMAGE_TYPES.includes(m[1])) throw badRequest('Image invalide (formats acceptés : JPEG, PNG, WebP).');
+  const bytes = Buffer.from(m[2], 'base64');
+  if (bytes.length === 0) throw badRequest('Image vide.');
+  if (bytes.length > MAX_IMAGE_BYTES) throw badRequest('Image trop lourde (1 Mo maximum).');
+  return { mime: m[1], data: m[2] };
+}
+
+/** null pour retirer la photo, undefined pour ne pas y toucher. */
+function imageUrlInput(value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === '') return null;
+  if (typeof value !== 'string' || value.length > 1_400_000 || !IMAGE_URL.test(value)) throw badRequest('Photo invalide.');
+  return value;
+}
+
+/** Texte facultatif qu'on peut effacer : null pour vider, undefined pour ne pas y toucher. */
+function clearableText(value, field, max) {
+  if (value === undefined) return undefined;
+  if (value === null || String(value).trim() === '') return null;
+  return toText(value, field, { max });
+}
 
 // Quantités déjà commandées sur des commandes ouvertes (réservées, pas encore déduites du stock).
 const RESERVED_SQL = `
@@ -69,8 +98,8 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
 
   // ================= Produits =================
   const productSelect = `
-    SELECT p.id, p.family_id, f.name AS family_name, p.name, p.price, p.cost_price, p.track_stock, p.stock,
-      p.alert_threshold, p.available,
+    SELECT p.id, p.family_id, f.name AS family_name, p.name, p.format, p.image_url, p.price, p.cost_price,
+      p.track_stock, p.stock, p.alert_threshold, p.available,
       ${RESERVED_SQL} AS reserved
     FROM products p JOIN families f ON f.id = p.family_id`;
   const getProduct = (id) => db.get(`${productSelect} WHERE p.id = ? AND p.archived = 0`, id);
@@ -93,7 +122,17 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
       track_stock: toBool(body?.track_stock, 'suivi du stock', { optional: true }),
       stock: toInt(body?.stock, 'stock', { min: 0, max: MAX_STOCK, optional: true }),
       available: toBool(body?.available, 'disponible', { optional: true }),
+      format: clearableText(body?.format, 'format', 30),
+      image_url: imageUrlInput(body?.image_url),
     };
+  }
+
+  /** Supprime une photo du serveur qu'aucun produit n'utilise plus (un produit dupliqué partage la photo). */
+  async function releaseImage(q, url) {
+    const m = /^\/api\/images\/(\d+)$/.exec(url ?? '');
+    if (!m) return;
+    const { n } = await q.get('SELECT COUNT(*) AS n FROM products WHERE image_url = ?', url);
+    if (n === 0) await q.run('DELETE FROM images WHERE id = ?', Number(m[1]));
   }
 
   async function assertUniqueProductName(familyId, name, exceptId = 0, q = db) {
@@ -110,10 +149,11 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
     const now = nowLocal();
     const id = await db.transaction(async (tx) => {
       const r = await tx.run(`INSERT INTO products
-        (family_id, name, price, cost_price, alert_threshold, track_stock, stock, available, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
-        p.family_id, p.name, p.price, p.cost_price ?? 0, p.alert_threshold ?? 0, p.track_stock ? 1 : 0,
-        p.available === false ? 0 : 1, now, now);
+        (family_id, name, format, image_url, price, cost_price, alert_threshold, track_stock, stock, available,
+         created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+        p.family_id, p.name, p.format ?? null, p.image_url ?? null, p.price, p.cost_price ?? 0, p.alert_threshold ?? 0,
+        p.track_stock ? 1 : 0, p.available === false ? 0 : 1, now, now);
       const productId = Number(r.lastInsertRowid);
       if (p.stock) {
         await applyStockMovement(tx, {
@@ -137,6 +177,8 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
       const merged = {
         family_id: p.family_id ?? current.family_id,
         name: p.name ?? current.name,
+        format: p.format === undefined ? current.format : p.format,
+        image_url: p.image_url === undefined ? current.image_url : p.image_url,
         price: p.price ?? current.price,
         cost_price: p.cost_price ?? current.cost_price,
         alert_threshold: p.alert_threshold ?? current.alert_threshold,
@@ -146,10 +188,11 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
       };
       await assertUniqueProductName(merged.family_id, merged.name, id, tx);
       const now = nowLocal();
-      await tx.run(`UPDATE products SET family_id = ?, name = ?, price = ?, cost_price = ?, alert_threshold = ?,
-        track_stock = ?, available = ?, updated_at = ? WHERE id = ?`,
-        merged.family_id, merged.name, merged.price, merged.cost_price, merged.alert_threshold,
-        merged.track_stock, merged.available, now, id);
+      await tx.run(`UPDATE products SET family_id = ?, name = ?, format = ?, image_url = ?, price = ?, cost_price = ?,
+        alert_threshold = ?, track_stock = ?, available = ?, updated_at = ? WHERE id = ?`,
+        merged.family_id, merged.name, merged.format, merged.image_url, merged.price, merged.cost_price,
+        merged.alert_threshold, merged.track_stock, merged.available, now, id);
+      if (current.image_url && merged.image_url !== current.image_url) await releaseImage(tx, current.image_url);
       // Toute correction directe du stock est tracée comme un ajustement.
       if (merged.stock !== current.stock) {
         await applyStockMovement(tx, {
@@ -169,6 +212,21 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
     // Archivage : l'historique des ventes reste intact.
     await db.run('UPDATE products SET archived = 1, available = 0, updated_at = ? WHERE id = ?', nowLocal(), id);
     res.json({ ok: true });
+  });
+
+  // ================= Photos des produits =================
+  app.post('/api/images', requireAdmin, async (req, res) => {
+    const { mime, data } = decodeImage(req.body?.data);
+    const r = await db.run('INSERT INTO images (mime, data, created_at) VALUES (?, ?, ?)', mime, data, nowLocal());
+    res.status(201).json({ url: `/api/images/${r.lastInsertRowid}` });
+  });
+
+  app.get('/api/images/:id', async (req, res) => {
+    const img = await db.get('SELECT mime, data FROM images WHERE id = ?', toInt(req.params.id, 'id'));
+    if (!img) throw notFound('Image introuvable.');
+    // Une image ne change jamais (une nouvelle photo reçoit un nouvel identifiant).
+    res.set({ 'Content-Type': img.mime, 'Cache-Control': 'private, max-age=31536000, immutable' });
+    res.send(Buffer.from(img.data, 'base64'));
   });
 
   // ================= Tables =================
