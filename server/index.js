@@ -1,29 +1,45 @@
 'use strict';
 
-const path = require('node:path');
-const { openDatabase, seed } = require('./db');
+const { openFromEnv, seed, hasUsers } = require('./db');
 const { createApp } = require('./app');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const DB_FILE = process.env.DB_FILE || path.join(__dirname, '..', 'data', 'ice-manager.db');
 
-const db = openDatabase(DB_FILE);
-if (seed(db, { adminPassword: process.env.ADMIN_PASSWORD || 'admin123', demoCatalog: process.env.DEMO_CATALOG !== '0' })) {
-  console.log('Base de données initialisée. Compte responsable : admin / ' +
-    (process.env.ADMIN_PASSWORD ? '(mot de passe défini par ADMIN_PASSWORD)' : 'admin123 — changez-le dès la première connexion !'));
-}
+async function main() {
+  const db = await openFromEnv();
+  console.log(`Base de données : ${db.dialect === 'postgres' ? 'PostgreSQL (DATABASE_URL)' : 'SQLite (fichier local)'}`);
 
-const app = createApp(db, { secureCookies: process.env.COOKIE_SECURE === '1' });
-const server = app.listen(PORT, HOST, () => {
-  console.log(`ICE MANAGER démarré sur http://localhost:${PORT}`);
-});
+  // Installation automatisée : ADMIN_PASSWORD crée directement le compte « admin ».
+  // Sinon, la première ouverture affiche l'écran de configuration de l'établissement.
+  if (!(await hasUsers(db))) {
+    if (process.env.ADMIN_PASSWORD) {
+      await seed(db, { adminPassword: process.env.ADMIN_PASSWORD, demoCatalog: process.env.DEMO_CATALOG !== '0' });
+      console.log('Compte responsable créé : admin (mot de passe défini par ADMIN_PASSWORD).');
+    } else {
+      console.log('Base vide : ouvrez l’application pour configurer l’établissement.');
+    }
+  }
 
-function shutdown() {
-  server.close(() => {
-    db.close();
-    process.exit(0);
+  const app = createApp(db, {
+    secureCookies: process.env.COOKIE_SECURE === '1',
+    trustProxy: process.env.TRUST_PROXY ? Number(process.env.TRUST_PROXY) : 'loopback',
   });
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`ICE MANAGER démarré sur http://localhost:${PORT}`);
+  });
+
+  const shutdown = () => {
+    server.close(async () => {
+      await db.close();
+      process.exit(0);
+    });
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+
+main().catch((err) => {
+  console.error('Démarrage impossible :', err.message);
+  process.exit(1);
+});

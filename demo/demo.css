@@ -24,5 +24,3 @@
 .ticket-preview .t-line { display: flex; justify-content: space-between; gap: 8px; }
 .ticket-preview .t-sub { font-size: 11px; padding-left: 12px; color: var(--text-2); }
 .sync-note { margin: 0; text-align: center; }
-.setup-card { width: min(440px, 100%); }
-.setup-card h1 { text-wrap: balance; }

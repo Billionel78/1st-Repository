@@ -15,7 +15,7 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
 // Modules CommonJS embarqués. Les modules Node indisponibles dans le navigateur sont remplacés.
 const MODULES = [
-  'server/app.js', 'server/db.js', 'server/http.js', 'server/time.js', 'server/stock.js',
+  'server/app.js', 'server/db.js', 'server/database.js', 'server/http.js', 'server/time.js', 'server/stock.js',
   'server/routes/catalog.js', 'server/routes/orders.js', 'server/routes/stats.js', 'server/routes/users.js',
   'server/routes/stock.js', 'server/routes/reports.js',
   'demo/main.js', 'demo/seed-demo.js', 'demo/shared-store.js',

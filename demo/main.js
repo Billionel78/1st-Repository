@@ -8,7 +8,9 @@
 //  - « shared » : la plateforme réelle, base partagée entre tous les appareils via le stockage
 //                 de l'artefact (capacité `db`), synchronisée en direct.
 
-const { openDatabase, seed } = require('../server/db');
+const { migrate, seed } = require('../server/db');
+const { SqliteDatabase } = require('../server/database');
+const { DatabaseSync } = require('./shims/sqlite');
 const { createApp } = require('../server/app');
 const { seedDemo } = require('./seed-demo');
 const { createSharedStore, SyncError, gzip, gunzip, toBase64, fromBase64 } = require('./shared-store');
@@ -29,18 +31,22 @@ const json = (status, data) => new Response(JSON.stringify(data), {
 });
 
 // ---------- Base courante ----------
-const current = { db: null, app: null, version: 0 };
+const current = { raw: null, db: null, app: null, version: 0 };
 
-function mount(bytes, version = 0) {
+/** Charge une base (contenu binaire SQLite, ou base vide) et l'application qui la sert. */
+async function mount(bytes, version = 0) {
   globalThis.__ICE_DB_BYTES = bytes || undefined;
-  const db = openDatabase(':memory:');
+  const raw = new DatabaseSync();
   globalThis.__ICE_DB_BYTES = undefined;
-  if (current.db) current.db.close();
-  Object.assign(current, { db, app: createApp(db), version });
-  return db;
+  raw.exec('PRAGMA foreign_keys = ON;');
+  const db = new SqliteDatabase(raw);
+  await migrate(db);
+  if (current.raw) current.raw.close();
+  Object.assign(current, { raw, db, app: createApp(db), version });
 }
 
-const totalChanges = () => current.db.prepare('SELECT total_changes() AS n').get().n;
+const totalChanges = () => current.raw.prepare('SELECT total_changes() AS n').get().n;
+const exportBytes = () => current.raw.export();
 
 // ---------- Requêtes ----------
 let cookie = storage.get(KEYS.session) || '';
@@ -75,8 +81,8 @@ function makeResponse() {
   };
 }
 
-/** Exécute une requête sur l'application locale (synchrone). */
-function run(method, url, body) {
+/** Exécute une requête sur l'application locale. */
+async function run(method, url, body) {
   const u = new URL(url, 'https://ice.local');
   const res = makeResponse();
   const req = {
@@ -84,7 +90,7 @@ function run(method, url, body) {
     headers: { cookie }, ip: '127.0.0.1',
   };
   try {
-    current.app.handle(req, res);
+    await current.app.handle(req, res);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Erreur interne.' });
@@ -95,8 +101,8 @@ function run(method, url, body) {
 
 const toResponse = (res) => new Response(res.body, { status: res.statusCode, headers: res.headers });
 
-function currentUser() {
-  const res = run('GET', '/api/auth/me');
+async function currentUser() {
+  const res = await run('GET', '/api/auth/me');
   return res.statusCode === 200 ? JSON.parse(res.body).user : null;
 }
 
@@ -116,17 +122,17 @@ function checkDatabase(bytes) {
 async function bootDemo() {
   const saved = storage.get(KEYS.db);
   if (saved) {
-    try { mount(fromBase64(saved)); } catch { current.db = null; }
+    try { await mount(fromBase64(saved)); } catch { current.db = null; }
   }
   if (!current.db) {
-    mount();
-    seed(current.db, { adminPassword: 'admin123' });
-    seedDemo(current.db);
+    await mount();
+    await seed(current.db, { adminPassword: 'admin123' });
+    await seedDemo(current.db);
   }
   persistDemo();
   return 'ready';
 }
-const persistDemo = () => storage.set(KEYS.db, toBase64(current.db.export()));
+const persistDemo = () => storage.set(KEYS.db, toBase64(exportBytes()));
 
 // ---------- Mode partagé ----------
 let shared = null;
@@ -139,7 +145,7 @@ async function bootShared() {
   shared = createSharedStore(store);
   const snap = await shared.load();
   if (!snap) return 'setup';
-  mount(snap.bytes, snap.version);
+  await mount(snap.bytes, snap.version);
   watchRemote();
   return 'ready';
 }
@@ -156,7 +162,7 @@ function refreshFromStore() {
     try {
       const snap = await shared.load();
       if (snap && snap.version > current.version) {
-        mount(snap.bytes, snap.version);
+        await mount(snap.bytes, snap.version);
         globalThis.dispatchEvent(new CustomEvent('ice:remote-change'));
       }
     } finally {
@@ -182,18 +188,18 @@ function sharedWrite(method, url, body) {
       const head = await shared.readHead();
       if ((head?.version ?? 0) !== current.version) {
         const snap = await shared.load();
-        mount(snap.bytes, snap.version);
+        await mount(snap.bytes, snap.version);
         globalThis.dispatchEvent(new CustomEvent('ice:remote-change'));
       }
       const before = totalChanges();
-      const res = run(method, url, body);
+      const res = await run(method, url, body);
       if (totalChanges() !== before) {
         try {
-          current.version = await shared.publish(current.version, current.db.export());
+          current.version = await shared.publish(current.version, exportBytes());
         } catch (err) {
           // La modification n'a pas pu être partagée : on revient à la version publiée.
           const snap = await shared.load().catch(() => null);
-          if (snap) mount(snap.bytes, snap.version);
+          if (snap) await mount(snap.bytes, snap.version);
           globalThis.dispatchEvent(new CustomEvent('ice:remote-change'));
           const message = err instanceof SyncError ? err.message
             : err?.code === 'quota_exceeded' ? 'Espace de stockage plein : faites une sauvegarde puis contactez votre administrateur.'
@@ -208,37 +214,25 @@ function sharedWrite(method, url, body) {
   });
 }
 
-/** Configuration initiale : crée la base et le compte du responsable. */
+/** Configuration initiale : crée la base (validation et création par la route du serveur) puis la partage. */
 function setup(body) {
   return serialized(async () => {
-    const barName = String(body?.bar_name ?? '').trim();
-    const fullName = String(body?.full_name ?? '').trim();
-    const username = String(body?.username ?? '').trim();
-    const password = String(body?.password ?? '');
-    if (!barName || barName.length > 60) return json(400, { error: 'Indiquez le nom de l’établissement (60 caractères maximum).' });
-    if (!fullName || fullName.length > 80) return json(400, { error: 'Indiquez votre nom (80 caractères maximum).' });
-    if (!/^[\w.-]{2,50}$/.test(username)) {
-      return json(400, { error: "L'identifiant doit contenir 2 à 50 lettres, chiffres, « . », « - » ou « _ »." });
-    }
-    if (password.length < 6) return json(400, { error: 'Le mot de passe doit contenir au moins 6 caractères.' });
-
     await shared.acquire();
     try {
       const existing = await shared.load();
       if (existing) {
-        mount(existing.bytes, existing.version);
+        await mount(existing.bytes, existing.version);
         status = 'ready';
         watchRemote();
         return json(409, { error: 'La plateforme a déjà été configurée depuis un autre appareil. Connectez-vous.' });
       }
-      mount();
-      seed(current.db, { adminPassword: password, demoCatalog: true });
-      current.db.prepare("UPDATE users SET username = ?, full_name = ? WHERE username = 'admin'").run(username, fullName);
-      current.db.prepare("UPDATE settings SET value = ? WHERE key = 'bar_name'").run(barName);
-      current.version = await shared.publish(0, current.db.export());
+      await mount();
+      const res = await run('POST', '/api/platform/setup', body);
+      if (res.statusCode !== 201) return toResponse(res);
+      current.version = await shared.publish(0, exportBytes());
       status = 'ready';
       watchRemote();
-      return json(201, { ok: true });
+      return toResponse(res);
     } finally {
       shared.release();
     }
@@ -247,20 +241,20 @@ function setup(body) {
 
 // ---------- Sauvegarde / restauration (responsable) ----------
 async function backup() {
-  const user = currentUser();
+  const user = await currentUser();
   if (user?.role !== 'admin') return json(403, { error: 'Action réservée au responsable.' });
-  const settings = JSON.parse(run('GET', '/api/settings').body);
+  const settings = JSON.parse((await run('GET', '/api/settings')).body);
   return json(200, {
     app: 'ICE MANAGER',
     format: 1,
     bar_name: settings.bar_name,
     created_at: new Date().toISOString(),
-    data: toBase64(await gzip(current.db.export())),
+    data: toBase64(await gzip(exportBytes())),
   });
 }
 
 async function restore(body) {
-  const user = currentUser();
+  const user = await currentUser();
   if (user?.role !== 'admin') return json(403, { error: 'Action réservée au responsable.' });
   let bytes;
   try {
@@ -271,7 +265,7 @@ async function restore(body) {
     return json(400, { error: 'Ce fichier n’est pas une sauvegarde ICE MANAGER valide.' });
   }
   if (MODE === 'demo') {
-    mount(bytes);
+    await mount(bytes);
     persistDemo();
     return json(200, { ok: true });
   }
@@ -280,7 +274,7 @@ async function restore(body) {
     try {
       const head = await shared.readHead();
       const version = await shared.publish(head?.version ?? 0, bytes);
-      mount(bytes, version);
+      await mount(bytes, version);
       return json(200, { ok: true });
     } catch (err) {
       return json(503, { error: err instanceof SyncError ? err.message : 'Restauration impossible. Réessayez.' });
@@ -328,7 +322,7 @@ async function handle(url, init = {}) {
   if (path === '/api/platform/restore' && method === 'POST') return restore(body);
 
   if (MODE === 'shared' && method !== 'GET') return sharedWrite(method, url, body);
-  const res = run(method, url, body);
+  const res = await run(method, url, body);
   if (MODE === 'demo' && method !== 'GET') persistDemo();
   return toResponse(res);
 }

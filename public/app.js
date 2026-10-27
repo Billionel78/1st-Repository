@@ -1533,6 +1533,67 @@ async function adminSettings(body) {
 }
 
 /* ---------- Démarrage ---------- */
+/** Première ouverture : création de l'établissement et du compte du responsable. */
+function showSetup() {
+  $('#app').hidden = true;
+  $('#login').hidden = false;
+  const loginForm = $('#login-form');
+  loginForm.hidden = true;
+  const card = document.createElement('form');
+  card.className = 'login-card setup-card';
+  card.id = 'setup-form';
+  card.noValidate = true;
+  card.innerHTML = `
+    <div class="login-logo" aria-hidden="true">🧊</div>
+    <h1>Bienvenue sur ICE MANAGER</h1>
+    <p class="muted">Première ouverture : configurez votre établissement et créez le compte du responsable.
+      Vous pourrez ensuite créer les comptes des serveurs dans Gestion → Utilisateurs.</p>
+    <label>Nom de l’établissement<input id="setup-bar" name="bar_name" maxlength="60" required placeholder="Ex. : Bar Le Glacier"></label>
+    <label>Votre nom<input id="setup-name" name="full_name" maxlength="80" required autocomplete="name"></label>
+    <label>Identifiant de connexion<input id="setup-user" name="username" maxlength="50" required autocomplete="username" placeholder="Ex. : patron"></label>
+    <label>Mot de passe<input id="setup-pass" name="password" type="password" required autocomplete="new-password"></label>
+    <label>Confirmer le mot de passe<input id="setup-pass2" name="confirm" type="password" required autocomplete="new-password"></label>
+    <p class="form-error" id="setup-error" role="alert"></p>
+    <button class="btn btn-primary btn-lg btn-block" type="submit">Créer mon établissement</button>
+    <p class="muted small">Un catalogue de départ (bières, vins, sucreries…), 8 tables et les paiements Espèces,
+      Orange Money, MTN Mobile Money et Wave sont créés : modifiez-les dans Gestion.</p>`;
+  loginForm.after(card);
+  setTimeout(() => $('#setup-bar').focus(), 30);
+  card.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const v = Object.fromEntries(new FormData(card));
+    const error = $('#setup-error');
+    if (Object.values(v).some((x) => !String(x).trim())) {
+      error.textContent = 'Remplissez tous les champs.';
+      return;
+    }
+    if (v.password !== v.confirm) {
+      error.textContent = 'Les deux mots de passe ne correspondent pas.';
+      return;
+    }
+    const btn = $('button[type=submit]', card);
+    btn.disabled = true;
+    btn.textContent = 'Création en cours…';
+    try {
+      await api('POST', '/api/platform/setup', v);
+    } catch (err) {
+      if (err.status !== 409) {
+        error.textContent = err.message;
+        btn.disabled = false;
+        btn.textContent = 'Créer mon établissement';
+        return;
+      }
+      toast(err.message);
+    }
+    card.remove();
+    loginForm.hidden = false;
+    // Connexion automatique avec le compte qui vient d'être créé.
+    loginForm.username.value = v.username;
+    loginForm.password.value = v.password;
+    loginForm.requestSubmit();
+  });
+}
+
 (async function init() {
   try {
     const me = await api('GET', '/api/auth/me');
@@ -1540,6 +1601,8 @@ async function adminSettings(body) {
     state.settings = me.settings;
     showApp();
   } catch {
-    showLogin();
+    const platform = await api('GET', '/api/platform').catch(() => null);
+    if (platform?.status === 'setup') showSetup();
+    else showLogin();
   }
 })();

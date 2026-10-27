@@ -159,6 +159,8 @@ label.check input { width: 22px; min-height: 22px; height: 22px; }
 .login-card label { text-align: left; }
 .login-card p { margin: -.6rem 0 .4rem; }
 .login-logo { font-size: 3rem; }
+.setup-card { width: min(440px, 100%); }
+.setup-card h1 { text-wrap: balance; }
 
 /* ---------- Structure ---------- */
 .app { min-height: 100vh; }

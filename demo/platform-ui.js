@@ -28,8 +28,6 @@
       reset.textContent = 'Confirmer : effacer mes essais et recharger';
       reset.classList.add('btn-danger');
     });
-  } else if (info.status === 'setup') {
-    renderSetup();
   } else if (info.status === 'unavailable') {
     loginCard.innerHTML = `
       <div class="login-logo" aria-hidden="true">🧊</div>
@@ -37,62 +35,9 @@
       <p class="form-error">Les données de l’établissement sont inaccessibles depuis cet écran.</p>
       <p class="muted">Ouvrez le lien de la plateforme dans claude.ai, connecté avec un compte qui y a accès
         (le compte du propriétaire, ou un compte invité comme éditeur), puis rechargez la page.</p>`;
-  } else {
+  } else if (info.status === 'ready') {
     loginCard.insertAdjacentHTML('beforeend',
       '<p class="muted small sync-note">Les données sont partagées en direct entre tous vos appareils.</p>');
-  }
-
-  function renderSetup() {
-    loginCard.hidden = true;
-    const card = document.createElement('form');
-    card.className = 'login-card setup-card';
-    card.id = 'setup-form';
-    card.noValidate = true;
-    card.innerHTML = `
-      <div class="login-logo" aria-hidden="true">🧊</div>
-      <h1>Bienvenue sur ICE MANAGER</h1>
-      <p class="muted">Première ouverture : configurez votre établissement et créez le compte du responsable.
-        Vous pourrez ensuite créer les comptes des serveurs dans Gestion → Utilisateurs.</p>
-      <label>Nom de l’établissement<input id="setup-bar" name="bar_name" maxlength="60" required placeholder="Ex. : Bar Le Glacier"></label>
-      <label>Votre nom<input id="setup-name" name="full_name" maxlength="80" required autocomplete="name"></label>
-      <label>Identifiant de connexion<input id="setup-user" name="username" maxlength="50" required autocomplete="username" placeholder="Ex. : patron"></label>
-      <label>Mot de passe<input id="setup-pass" name="password" type="password" required autocomplete="new-password"></label>
-      <label>Confirmer le mot de passe<input id="setup-pass2" name="confirm" type="password" required autocomplete="new-password"></label>
-      <p class="form-error" id="setup-error" role="alert"></p>
-      <button class="btn btn-primary btn-lg btn-block" type="submit">Créer mon établissement</button>
-      <p class="muted small">Un catalogue de départ (bières, vins, sucreries…), 8 tables et les paiements Espèces,
-        Orange Money, MTN Mobile Money et Wave sont créés : modifiez-les dans Gestion.</p>`;
-    loginCard.after(card);
-    card.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const v = Object.fromEntries(new FormData(card));
-      const error = card.querySelector('#setup-error');
-      if (v.password !== v.confirm) {
-        error.textContent = 'Les deux mots de passe ne correspondent pas.';
-        return;
-      }
-      const btn = card.querySelector('button[type=submit]');
-      btn.disabled = true;
-      btn.textContent = 'Création en cours…';
-      const res = await fetch('/api/platform/setup', { method: 'POST', body: JSON.stringify(v) });
-      const data = await res.json();
-      if (!res.ok && res.status !== 409) {
-        error.textContent = data.error;
-        btn.disabled = false;
-        btn.textContent = 'Créer mon établissement';
-        return;
-      }
-      card.remove();
-      loginCard.hidden = false;
-      if (res.ok) {
-        // Connexion automatique avec le compte qui vient d'être créé.
-        loginCard.username.value = v.username;
-        loginCard.password.value = v.password;
-        loginCard.requestSubmit();
-      } else {
-        toast(data.error);
-      }
-    });
   }
 
   // Modifications faites sur un autre appareil : on actualise les écrans « en direct ».

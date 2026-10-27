@@ -1,0 +1,23 @@
+# Déploiement sur Render (https://render.com) : New → Blueprint → choisir ce dépôt.
+# Render demande alors les valeurs marquées « sync: false » (à ne jamais écrire dans ce fichier).
+services:
+  - type: web
+    name: ice-manager
+    runtime: node
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    healthCheckPath: /api/platform
+    envVars:
+      - key: NODE_VERSION
+        value: 22.22.0
+      # URL de connexion PostgreSQL (Neon : utiliser l'adresse « pooler »).
+      - key: DATABASE_URL
+        sync: false
+      # Fuseau horaire du bar, pour regrouper les ventes par journée (ex. Africa/Abidjan, Africa/Douala).
+      - key: TZ
+        sync: false
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: TRUST_PROXY
+        value: "1"

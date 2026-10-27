@@ -1,7 +1,6 @@
 'use strict';
 
 const { badRequest, notFound, conflict, toInt, toText } = require('../http');
-const { transaction } = require('../db');
 const { nowLocal, isIsoDate } = require('../time');
 const { applyStockMovement } = require('../stock');
 
@@ -10,25 +9,26 @@ const STATUSES = ['open', 'paid', 'cancelled'];
 
 module.exports = function orderRoutes(app, db, { requireAdmin }) {
   // ---------- Lecture ----------
-  function loadOrder(id) {
-    const order = db.prepare(`
+  // `q` : la base, ou la transaction en cours.
+  async function loadOrder(id, q = db) {
+    const order = await q.get(`
       SELECT o.*, u.full_name AS created_by_name
-      FROM orders o LEFT JOIN users u ON u.id = o.created_by WHERE o.id = ?`).get(id);
+      FROM orders o LEFT JOIN users u ON u.id = o.created_by WHERE o.id = ?`, id);
     if (!order) return null;
     order.remaining = order.total - order.paid_amount;
-    order.items = db.prepare(`
+    order.items = await q.all(`
       SELECT id, product_id, product_name, family_name, unit_price, quantity, unit_price * quantity AS amount,
         created_at, updated_at
-      FROM order_items WHERE order_id = ? ORDER BY id`).all(id);
-    order.payments = db.prepare(`
+      FROM order_items WHERE order_id = ? ORDER BY id`, id);
+    order.payments = await q.all(`
       SELECT p.id, p.method_id, p.method_name, p.method_type, p.amount, p.received_amount, p.change_amount,
         p.reference, p.created_at, u.full_name AS created_by_name
-      FROM payments p LEFT JOIN users u ON u.id = p.created_by WHERE p.order_id = ? ORDER BY p.id`).all(id);
+      FROM payments p LEFT JOIN users u ON u.id = p.created_by WHERE p.order_id = ? ORDER BY p.id`, id);
     return order;
   }
 
-  function requireOrder(id) {
-    const order = loadOrder(id);
+  async function requireOrder(id, q = db) {
+    const order = await loadOrder(id, q);
     if (!order) throw notFound('Commande introuvable.');
     return order;
   }
@@ -37,7 +37,7 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
     if (order.status !== 'open') throw conflict('Cette commande est déjà clôturée.');
   }
 
-  app.get('/api/orders', (req, res) => {
+  app.get('/api/orders', async (req, res) => {
     const where = [];
     const params = [];
     if (req.query.status !== undefined) {
@@ -55,30 +55,34 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
       params.push(toInt(req.query.table_id, 'table'));
     }
     const limit = toInt(req.query.limit, 'limite', { min: 1, max: 1000, optional: true }) ?? 500;
-    const orders = db.prepare(`
+    const orders = await db.all(`
       SELECT o.id, o.number, o.table_id, o.table_name, o.status, o.total, o.paid_amount,
         o.total - o.paid_amount AS remaining, o.created_at, o.updated_at, o.closed_at, o.cancel_reason,
         u.full_name AS created_by_name
       FROM orders o LEFT JOIN users u ON u.id = o.created_by
       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-      ORDER BY o.created_at DESC, o.id DESC LIMIT ${limit}`).all(...params);
+      ORDER BY o.created_at DESC, o.id DESC LIMIT ${limit}`, ...params);
 
-    // Détail compact pour l'historique (articles + modes de paiement).
-    const itemsStmt = db.prepare(
-      'SELECT product_name, unit_price, quantity, unit_price * quantity AS amount FROM order_items WHERE order_id = ? ORDER BY id'
-    );
-    const methodsStmt = db.prepare(
-      'SELECT method_name, method_type, SUM(amount) AS amount FROM payments WHERE order_id = ? GROUP BY method_name, method_type'
-    );
-    for (const o of orders) {
-      o.items = itemsStmt.all(o.id);
-      o.payment_methods = methodsStmt.all(o.id);
+    // Détail compact pour l'historique (articles + modes de paiement), en deux requêtes au total.
+    const byOrder = new Map(orders.map((o) => [o.id, Object.assign(o, { items: [], payment_methods: [] })]));
+    if (orders.length) {
+      const ids = orders.map((o) => o.id);
+      const marks = ids.map(() => '?').join(', ');
+      const items = await db.all(`
+        SELECT order_id, product_name, unit_price, quantity, unit_price * quantity AS amount
+        FROM order_items WHERE order_id IN (${marks}) ORDER BY id`, ...ids);
+      for (const { order_id: orderId, ...item } of items) byOrder.get(orderId).items.push(item);
+      const methods = await db.all(`
+        SELECT order_id, method_name, method_type, SUM(amount) AS amount
+        FROM payments WHERE order_id IN (${marks})
+        GROUP BY order_id, method_name, method_type ORDER BY MIN(id)`, ...ids);
+      for (const { order_id: orderId, ...m } of methods) byOrder.get(orderId).payment_methods.push(m);
     }
     res.json(orders);
   });
 
-  app.get('/api/orders/:id', (req, res) => {
-    res.json(requireOrder(toInt(req.params.id, 'id')));
+  app.get('/api/orders/:id', async (req, res) => {
+    res.json(await requireOrder(toInt(req.params.id, 'id')));
   });
 
   // ---------- Saisie ----------
@@ -98,37 +102,30 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
     return [...merged].map(([product_id, quantity]) => ({ product_id, quantity }));
   }
 
-  function nextOrderNumber(now) {
+  async function nextOrderNumber(tx, now) {
     const day = now.slice(0, 10).replaceAll('-', '');
     const prefix = `CMD-${day}-`;
-    const last = db.prepare('SELECT number FROM orders WHERE number LIKE ? ORDER BY number DESC LIMIT 1').get(`${prefix}%`);
+    const last = await tx.get('SELECT number FROM orders WHERE number LIKE ? ORDER BY number DESC LIMIT 1', `${prefix}%`);
     const seq = last ? Number(last.number.slice(prefix.length)) + 1 : 1;
     return `${prefix}${String(seq).padStart(4, '0')}`;
   }
 
-  function recomputeTotal(orderId, now) {
-    db.prepare(`UPDATE orders SET
+  function recomputeTotal(tx, orderId, now) {
+    return tx.run(`UPDATE orders SET
         total = COALESCE((SELECT SUM(unit_price * quantity) FROM order_items WHERE order_id = ?), 0),
         updated_at = ?
-      WHERE id = ?`).run(orderId, now, orderId);
+      WHERE id = ?`, orderId, now, orderId);
   }
 
   /** Ajoute les articles à une commande ouverte : fusionne avec une ligne existante au même prix. */
-  function addItems(orderId, items, now) {
-    const getProduct = db.prepare(`
-      SELECT p.*, f.name AS family_name,
-        COALESCE((SELECT SUM(oi.quantity) FROM order_items oi JOIN orders o ON o.id = oi.order_id
-                  WHERE oi.product_id = p.id AND o.status = 'open'), 0) AS reserved
-      FROM products p JOIN families f ON f.id = p.family_id
-      WHERE p.id = ? AND p.archived = 0`);
-    const findLine = db.prepare('SELECT id FROM order_items WHERE order_id = ? AND product_id = ? AND unit_price = ?');
-    const bumpLine = db.prepare('UPDATE order_items SET quantity = quantity + ?, updated_at = ? WHERE id = ?');
-    const insertLine = db.prepare(`INSERT INTO order_items
-      (order_id, product_id, product_name, family_name, unit_price, unit_cost, quantity, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-
+  async function addItems(tx, orderId, items, now) {
     for (const { product_id, quantity } of items) {
-      const p = getProduct.get(product_id);
+      const p = await tx.get(`
+        SELECT p.*, f.name AS family_name,
+          COALESCE((SELECT SUM(oi.quantity) FROM order_items oi JOIN orders o ON o.id = oi.order_id
+                    WHERE oi.product_id = p.id AND o.status = 'open'), 0) AS reserved
+        FROM products p JOIN families f ON f.id = p.family_id
+        WHERE p.id = ? AND p.archived = 0`, product_id);
       if (!p) throw badRequest('Produit introuvable.');
       if (!p.available) throw conflict(`« ${p.name} » n’est pas disponible actuellement.`);
       if (p.track_stock) {
@@ -137,59 +134,66 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
           throw conflict(`Stock insuffisant pour « ${p.name} » : ${Math.max(free, 0)} disponible(s).`);
         }
       }
-      const line = findLine.get(orderId, product_id, p.price);
-      if (line) bumpLine.run(quantity, now, line.id);
-      else insertLine.run(orderId, product_id, p.name, p.family_name, p.price, p.cost_price, quantity, now, now);
+      const line = await tx.get('SELECT id FROM order_items WHERE order_id = ? AND product_id = ? AND unit_price = ?',
+        orderId, product_id, p.price);
+      if (line) {
+        await tx.run('UPDATE order_items SET quantity = quantity + ?, updated_at = ? WHERE id = ?', quantity, now, line.id);
+      } else {
+        await tx.run(`INSERT INTO order_items
+          (order_id, product_id, product_name, family_name, unit_price, unit_cost, quantity, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          orderId, product_id, p.name, p.family_name, p.price, p.cost_price, quantity, now, now);
+      }
     }
-    recomputeTotal(orderId, now);
+    await recomputeTotal(tx, orderId, now);
   }
 
   // Ajoute des articles sur une table : complète la commande ouverte de la table ou en crée une nouvelle.
-  app.post('/api/orders', (req, res) => {
+  app.post('/api/orders', async (req, res) => {
     const tableId = toInt(req.body?.table_id, 'table', { min: 1 });
     const items = parseItems(req.body);
-    const { orderId, created } = transaction(db, () => {
-      const table = db.prepare('SELECT * FROM bar_tables WHERE id = ? AND archived = 0').get(tableId);
+    const { orderId, created } = await db.transaction(async (tx) => {
+      const table = await tx.get('SELECT * FROM bar_tables WHERE id = ? AND archived = 0', tableId);
       if (!table) throw badRequest('Table introuvable.');
       const now = nowLocal();
-      const open = db.prepare("SELECT id FROM orders WHERE table_id = ? AND status = 'open'").get(tableId);
+      const open = await tx.get("SELECT id FROM orders WHERE table_id = ? AND status = 'open'", tableId);
       let id = open?.id;
       if (!id) {
-        id = Number(db.prepare(`INSERT INTO orders (number, table_id, table_name, status, created_by, created_at, updated_at)
-          VALUES (?, ?, ?, 'open', ?, ?, ?)`).run(nextOrderNumber(now), tableId, table.name, req.user.id, now, now)
-          .lastInsertRowid);
+        const r = await tx.run(`INSERT INTO orders (number, table_id, table_name, status, created_by, created_at, updated_at)
+          VALUES (?, ?, ?, 'open', ?, ?, ?)`, await nextOrderNumber(tx, now), tableId, table.name, req.user.id, now, now);
+        id = Number(r.lastInsertRowid);
       }
-      addItems(id, items, now);
+      await addItems(tx, id, items, now);
       return { orderId: id, created: !open };
     });
-    res.status(created ? 201 : 200).json({ created, order: loadOrder(orderId) });
+    res.status(created ? 201 : 200).json({ created, order: await loadOrder(orderId) });
   });
 
-  app.post('/api/orders/:id/items', (req, res) => {
+  app.post('/api/orders/:id/items', async (req, res) => {
     const id = toInt(req.params.id, 'id');
     const items = parseItems(req.body);
-    transaction(db, () => {
-      requireOpen(requireOrder(id));
-      addItems(id, items, nowLocal());
+    await db.transaction(async (tx) => {
+      requireOpen(await requireOrder(id, tx));
+      await addItems(tx, id, items, nowLocal());
     });
-    res.json(loadOrder(id));
+    res.json(await loadOrder(id));
   });
 
   // Correction d'une ligne (quantité 0 = suppression) tant que la commande est ouverte.
-  app.patch('/api/orders/:id/items/:itemId', (req, res) => {
+  app.patch('/api/orders/:id/items/:itemId', async (req, res) => {
     const id = toInt(req.params.id, 'id');
     const itemId = toInt(req.params.itemId, 'article');
     const quantity = toInt(req.body?.quantity, 'quantité', { min: 0, max: MAX_QTY });
-    transaction(db, () => {
-      const order = requireOrder(id);
+    await db.transaction(async (tx) => {
+      const order = await requireOrder(id, tx);
       requireOpen(order);
       const item = order.items.find((i) => i.id === itemId);
       if (!item) throw notFound('Article introuvable dans cette commande.');
       if (quantity > item.quantity) {
-        const p = db.prepare('SELECT * FROM products WHERE id = ?').get(item.product_id);
+        const p = await tx.get('SELECT * FROM products WHERE id = ?', item.product_id);
         if (p?.track_stock) {
-          const reserved = db.prepare(`SELECT COALESCE(SUM(oi.quantity), 0) AS n FROM order_items oi
-            JOIN orders o ON o.id = oi.order_id WHERE oi.product_id = ? AND o.status = 'open'`).get(p.id).n;
+          const { n: reserved } = await tx.get(`SELECT COALESCE(SUM(oi.quantity), 0) AS n FROM order_items oi
+            JOIN orders o ON o.id = oi.order_id WHERE oi.product_id = ? AND o.status = 'open'`, p.id);
           const free = p.stock - reserved;
           if (quantity - item.quantity > free) {
             throw conflict(`Stock insuffisant pour « ${p.name} » : ${Math.max(free, 0)} disponible(s).`);
@@ -201,56 +205,56 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
         throw conflict('Impossible : le total deviendrait inférieur au montant déjà payé.');
       }
       const now = nowLocal();
-      if (quantity === 0) db.prepare('DELETE FROM order_items WHERE id = ?').run(itemId);
-      else db.prepare('UPDATE order_items SET quantity = ?, updated_at = ? WHERE id = ?').run(quantity, now, itemId);
-      recomputeTotal(id, now);
+      if (quantity === 0) await tx.run('DELETE FROM order_items WHERE id = ?', itemId);
+      else await tx.run('UPDATE order_items SET quantity = ?, updated_at = ? WHERE id = ?', quantity, now, itemId);
+      await recomputeTotal(tx, id, now);
     });
-    res.json(loadOrder(id));
+    res.json(await loadOrder(id));
   });
 
   // Transfert d'une commande ouverte vers une autre table libre.
-  app.post('/api/orders/:id/transfer', (req, res) => {
+  app.post('/api/orders/:id/transfer', async (req, res) => {
     const id = toInt(req.params.id, 'id');
     const tableId = toInt(req.body?.table_id, 'table', { min: 1 });
-    transaction(db, () => {
-      const order = requireOrder(id);
+    await db.transaction(async (tx) => {
+      const order = await requireOrder(id, tx);
       requireOpen(order);
-      const table = db.prepare('SELECT * FROM bar_tables WHERE id = ? AND archived = 0').get(tableId);
+      const table = await tx.get('SELECT * FROM bar_tables WHERE id = ? AND archived = 0', tableId);
       if (!table) throw badRequest('Table introuvable.');
       if (table.id === order.table_id) return;
-      const busy = db.prepare("SELECT id FROM orders WHERE table_id = ? AND status = 'open'").get(tableId);
+      const busy = await tx.get("SELECT id FROM orders WHERE table_id = ? AND status = 'open'", tableId);
       if (busy) throw conflict(`${table.name} a déjà une commande ouverte.`);
-      db.prepare('UPDATE orders SET table_id = ?, table_name = ?, updated_at = ? WHERE id = ?')
-        .run(table.id, table.name, nowLocal(), id);
+      await tx.run('UPDATE orders SET table_id = ?, table_name = ?, updated_at = ? WHERE id = ?',
+        table.id, table.name, nowLocal(), id);
     });
-    res.json(loadOrder(id));
+    res.json(await loadOrder(id));
   });
 
-  app.post('/api/orders/:id/cancel', requireAdmin, (req, res) => {
+  app.post('/api/orders/:id/cancel', requireAdmin, async (req, res) => {
     const id = toInt(req.params.id, 'id');
     const reason = toText(req.body?.reason, 'motif', { max: 200, optional: true }) ?? null;
-    transaction(db, () => {
-      const order = requireOrder(id);
+    await db.transaction(async (tx) => {
+      const order = await requireOrder(id, tx);
       requireOpen(order);
       if (order.paid_amount > 0) throw conflict('Impossible d’annuler une commande partiellement payée.');
       const now = nowLocal();
-      db.prepare("UPDATE orders SET status = 'cancelled', cancel_reason = ?, closed_at = ?, updated_at = ? WHERE id = ?")
-        .run(reason, now, now, id);
+      await tx.run("UPDATE orders SET status = 'cancelled', cancel_reason = ?, closed_at = ?, updated_at = ? WHERE id = ?",
+        reason, now, now, id);
     });
-    res.json(loadOrder(id));
+    res.json(await loadOrder(id));
   });
 
   // ---------- Paiement ----------
-  app.post('/api/orders/:id/payments', (req, res) => {
+  app.post('/api/orders/:id/payments', async (req, res) => {
     const id = toInt(req.params.id, 'id');
     const methodId = toInt(req.body?.method_id, 'mode de paiement', { min: 1 });
     const reference = toText(req.body?.reference, 'référence', { max: 60, optional: true }) ?? null;
 
-    const result = transaction(db, () => {
-      const order = requireOrder(id);
+    const result = await db.transaction(async (tx) => {
+      const order = await requireOrder(id, tx);
       requireOpen(order);
       if (order.total <= 0) throw conflict('La commande est vide.');
-      const method = db.prepare('SELECT * FROM payment_methods WHERE id = ? AND archived = 0').get(methodId);
+      const method = await tx.get('SELECT * FROM payment_methods WHERE id = ? AND archived = 0', methodId);
       if (!method) throw badRequest('Mode de paiement introuvable.');
 
       const amount = toInt(req.body?.amount, 'montant', { min: 1, optional: true }) ?? order.remaining;
@@ -266,29 +270,28 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
       }
 
       const now = nowLocal();
-      db.prepare(`INSERT INTO payments
+      await tx.run(`INSERT INTO payments
         (order_id, method_id, method_name, method_type, amount, received_amount, change_amount, reference, created_by, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-        id, method.id, method.name, method.type, amount, received, change, reference, req.user.id, now
-      );
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, method.id, method.name, method.type, amount, received, change, reference, req.user.id, now);
       const paid = order.paid_amount + amount;
       const fullyPaid = paid === order.total;
       if (fullyPaid) {
-        db.prepare("UPDATE orders SET paid_amount = ?, status = 'paid', closed_at = ?, updated_at = ? WHERE id = ?")
-          .run(paid, now, now, id);
+        await tx.run("UPDATE orders SET paid_amount = ?, status = 'paid', closed_at = ?, updated_at = ? WHERE id = ?",
+          paid, now, now, id);
         // Mise à jour du stock des produits suivis (mouvement « vente »).
-        const tracked = db.prepare('SELECT track_stock FROM products WHERE id = ?');
         for (const item of order.items) {
-          if (!tracked.get(item.product_id)?.track_stock) continue;
-          applyStockMovement(db, {
+          const product = await tx.get('SELECT track_stock FROM products WHERE id = ?', item.product_id);
+          if (!product?.track_stock) continue;
+          await applyStockMovement(tx, {
             productId: item.product_id, type: 'vente', delta: -item.quantity, orderId: id, userId: req.user.id, at: now,
           });
         }
       } else {
-        db.prepare('UPDATE orders SET paid_amount = ?, updated_at = ? WHERE id = ?').run(paid, now, id);
+        await tx.run('UPDATE orders SET paid_amount = ?, updated_at = ? WHERE id = ?', paid, now, id);
       }
       return { fullyPaid, change };
     });
-    res.status(201).json({ fully_paid: result.fullyPaid, change: result.change, order: loadOrder(id) });
+    res.status(201).json({ fully_paid: result.fullyPaid, change: result.change, order: await loadOrder(id) });
   });
 };

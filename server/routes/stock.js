@@ -1,7 +1,6 @@
 'use strict';
 
 const { badRequest, notFound, conflict, toInt, toText } = require('../http');
-const { transaction } = require('../db');
 const { applyStockMovement } = require('../stock');
 const { isIsoDate } = require('../time');
 
@@ -10,8 +9,8 @@ const MANUAL_TYPES = ['entree', 'perte', 'inventaire'];
 
 module.exports = function stockRoutes(app, db, { requireAdmin }) {
   // État du stock des produits suivis.
-  app.get('/api/stock', requireAdmin, (req, res) => {
-    const rows = db.prepare(`
+  app.get('/api/stock', requireAdmin, async (req, res) => {
+    const rows = await db.all(`
       SELECT p.id, p.name, p.family_id, f.name AS family_name, p.price, p.cost_price, p.stock, p.alert_threshold,
         p.available,
         COALESCE((SELECT SUM(oi.quantity) FROM order_items oi JOIN orders o ON o.id = oi.order_id
@@ -19,7 +18,7 @@ module.exports = function stockRoutes(app, db, { requireAdmin }) {
         (SELECT MAX(created_at) FROM stock_movements m WHERE m.product_id = p.id AND m.type = 'entree') AS last_entry
       FROM products p JOIN families f ON f.id = p.family_id
       WHERE p.archived = 0 AND f.archived = 0 AND p.track_stock = 1
-      ORDER BY f.position, f.name, p.name`).all();
+      ORDER BY f.position, f.name, p.name`);
     for (const r of rows) {
       r.free = r.stock - r.reserved;
       r.status = r.free <= 0 ? 'rupture' : r.free <= r.alert_threshold ? 'alerte' : 'ok';
@@ -34,7 +33,7 @@ module.exports = function stockRoutes(app, db, { requireAdmin }) {
    *  - perte       : casse, offert, périmé… (−quantité) ;
    *  - inventaire  : quantité réellement comptée, l'écart est enregistré.
    */
-  app.post('/api/stock/movements', requireAdmin, (req, res) => {
+  app.post('/api/stock/movements', requireAdmin, async (req, res) => {
     const productId = toInt(req.body?.product_id, 'produit', { min: 1 });
     const type = req.body?.type;
     if (!MANUAL_TYPES.includes(type)) throw badRequest('Type de mouvement invalide (entree, perte ou inventaire).');
@@ -42,8 +41,8 @@ module.exports = function stockRoutes(app, db, { requireAdmin }) {
     const unitCost = toInt(req.body?.unit_cost, "prix d'achat", { min: 0, max: 100_000_000, optional: true });
     const note = toText(req.body?.note, 'note', { max: 200, optional: true }) ?? null;
 
-    const result = transaction(db, () => {
-      const p = db.prepare('SELECT * FROM products WHERE id = ? AND archived = 0').get(productId);
+    const result = await db.transaction(async (tx) => {
+      const p = await tx.get('SELECT * FROM products WHERE id = ? AND archived = 0', productId);
       if (!p) throw notFound('Produit introuvable.');
       if (!p.track_stock) throw conflict(`Le suivi du stock n’est pas activé pour « ${p.name} ».`);
       let delta;
@@ -51,19 +50,19 @@ module.exports = function stockRoutes(app, db, { requireAdmin }) {
       else if (type === 'perte') delta = -quantity;
       else delta = quantity - p.stock;
       if (type === 'inventaire' && delta === 0) return { stock: p.stock, delta: 0 };
-      const stock = applyStockMovement(db, {
+      const stock = await applyStockMovement(tx, {
         productId, type, delta, unitCost: type === 'entree' ? (unitCost ?? null) : null, note, userId: req.user.id,
       });
       // Une entrée avec un nouveau prix d'achat met à jour le prix d'achat du produit.
       if (type === 'entree' && unitCost !== undefined) {
-        db.prepare('UPDATE products SET cost_price = ? WHERE id = ?').run(unitCost, productId);
+        await tx.run('UPDATE products SET cost_price = ? WHERE id = ?', unitCost, productId);
       }
       return { stock, delta };
     });
     res.status(201).json(result);
   });
 
-  app.get('/api/stock/movements', requireAdmin, (req, res) => {
+  app.get('/api/stock/movements', requireAdmin, async (req, res) => {
     const where = [];
     const params = [];
     if (req.query.product_id !== undefined) {
@@ -81,7 +80,7 @@ module.exports = function stockRoutes(app, db, { requireAdmin }) {
       params.push(String(req.query.type));
     }
     const limit = toInt(req.query.limit, 'limite', { min: 1, max: 2000, optional: true }) ?? 300;
-    res.json(db.prepare(`
+    res.json(await db.all(`
       SELECT m.id, m.product_id, p.name AS product_name, m.type, m.quantity, m.stock_after, m.unit_cost, m.note,
         m.order_id, o.number AS order_number, m.created_at, u.full_name AS created_by_name
       FROM stock_movements m
@@ -89,6 +88,6 @@ module.exports = function stockRoutes(app, db, { requireAdmin }) {
       LEFT JOIN orders o ON o.id = m.order_id
       LEFT JOIN users u ON u.id = m.created_by
       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
-      ORDER BY m.id DESC LIMIT ${limit}`).all(...params));
+      ORDER BY m.id DESC LIMIT ${limit}`, ...params));
   });
 };

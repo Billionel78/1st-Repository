@@ -4,9 +4,10 @@ Application web simple pour gérer un bar : familles de produits, produits, tabl
 paiements (Cash et Mobile Money), historique et statistiques quotidiennes.
 Elle s'utilise depuis un navigateur sur ordinateur, tablette ou téléphone.
 
-## Démarrage rapide
+## Démarrage rapide (sur un ordinateur)
 
-Prérequis : **Node.js 22.5 ou plus récent** (la base SQLite est intégrée à Node, rien d'autre à installer).
+Prérequis : **Node.js 22.13 ou plus récent**. Sans configuration, les données sont stockées dans un
+fichier SQLite local (`data/ice-manager.db`).
 
 ```bash
 npm install
@@ -14,27 +15,66 @@ npm start
 ```
 
 Ouvrez ensuite <http://localhost:3000> (ou `http://<adresse-ip-du-poste>:3000` depuis une tablette
-ou un téléphone connecté au même réseau Wi-Fi).
+ou un téléphone connecté au même réseau Wi-Fi). À la première ouverture, un écran de configuration
+crée l'établissement et le compte du responsable (identifiant et mot de passe de votre choix).
 
-Premier compte : **admin / admin123**. Changez ce mot de passe dès la première connexion
-(menu en haut à droite → « Changer mon mot de passe »).
+Un catalogue de départ (Bières, Vins, Liqueurs, Boissons non alcoolisées, Sucreries, Autres produits),
+8 tables et les moyens de paiement Espèces, Orange Money, MTN Mobile Money et Wave sont créés.
+Tout est modifiable dans **Gestion**.
 
-Au premier lancement, l'application crée un catalogue d'exemple (Bières, Vins, Liqueurs, Boissons
-non alcoolisées, Sucreries, Autres produits), 8 tables et les moyens de paiement Espèces,
-Orange Money, MTN Mobile Money et Wave. Tout est modifiable dans **Gestion**.
+## Base de données PostgreSQL (Neon…)
 
-### Variables d'environnement (facultatives)
+Si la variable `DATABASE_URL` est définie, l'application utilise PostgreSQL au lieu de SQLite.
+Les tables sont créées automatiquement au démarrage (rien à faire dans la console de la base).
+
+```bash
+DATABASE_URL="postgresql://utilisateur:motdepasse@hote/base?sslmode=require" npm start
+```
+
+- Avec **Neon**, utilisez l'adresse **« pooler »** (`…-pooler….neon.tech`).
+- Ne mettez jamais cette adresse (elle contient le mot de passe) dans le code ou dans Git :
+  uniquement dans les variables d'environnement de l'hébergeur ou dans un fichier `.env` local
+  (ignoré par Git).
+- Les écritures sont sérialisées par un verrou PostgreSQL : plusieurs instances du serveur peuvent
+  travailler sur la même base sans doublon de numéro de commande ni survente de stock.
+
+## Mise en ligne (adresse publique permanente)
+
+### Render (gratuit pour commencer)
+
+1. Créez un compte sur <https://render.com> et connectez votre compte GitHub.
+2. **New → Blueprint**, choisissez ce dépôt : le fichier `render.yaml` configure tout.
+3. Render demande deux valeurs :
+   - `DATABASE_URL` : l'adresse PostgreSQL (Neon, adresse « pooler ») ;
+   - `TZ` : le fuseau horaire du bar, par exemple `Africa/Abidjan` (GMT), `Africa/Douala` ou
+     `Africa/Kinshasa` (GMT+1).
+4. Une fois le déploiement terminé, Render donne l'adresse du site (`https://ice-manager-….onrender.com`).
+   Ouvrez-la : l'écran de configuration de l'établissement s'affiche.
+
+Sur l'offre gratuite de Render, le service s'endort après 15 minutes sans visite et met environ une
+minute à se réveiller ; une offre payante évite cette attente pendant le service.
+
+### Autres hébergeurs
+
+Le `Dockerfile` fonctionne sur tout hébergeur compatible Docker (Railway, Fly.io, Koyeb, un VPS…) :
+fournir `DATABASE_URL`, `TZ`, et `COOKIE_SECURE=1` derrière HTTPS.
+
+### Variables d'environnement
 
 | Variable | Rôle | Défaut |
 |---|---|---|
+| `DATABASE_URL` | Base PostgreSQL ; absente : fichier SQLite | — |
 | `PORT` | Port HTTP | `3000` |
-| `DB_FILE` | Emplacement de la base de données | `data/ice-manager.db` |
-| `ADMIN_PASSWORD` | Mot de passe du compte `admin` créé au premier lancement | `admin123` |
-| `DEMO_CATALOG` | `0` pour démarrer sans le catalogue d'exemple | `1` |
-| `TZ` | Fuseau horaire utilisé pour regrouper les ventes par jour (ex. `Africa/Abidjan`) | fuseau du système |
+| `DB_FILE` | Fichier SQLite (sans `DATABASE_URL`) | `data/ice-manager.db` |
+| `TZ` | Fuseau horaire utilisé pour regrouper les ventes par jour | fuseau du système |
 | `COOKIE_SECURE` | `1` si l'application est servie en HTTPS | — |
+| `TRUST_PROXY` | `1` derrière le proxy d'un hébergeur (Render…) | — |
+| `ADMIN_PASSWORD` | Installation automatisée : crée le compte `admin` sans écran de configuration | — |
+| `DEMO_CATALOG` | `0` pour ne pas créer le catalogue de départ (avec `ADMIN_PASSWORD`) | `1` |
+| `PG_POOL_MAX` | Nombre maximal de connexions PostgreSQL | `5` |
 
-Sauvegarde : il suffit de copier le dossier `data/` (application arrêtée).
+Sauvegarde : avec SQLite, copier le dossier `data/` (application arrêtée) ; avec Neon, utiliser les
+sauvegardes et la restauration à un instant donné proposées par Neon.
 
 ## Fonctionnement
 
@@ -100,7 +140,8 @@ Le suivi du stock s'active produit par produit (Gestion → Produits → « Acti
 server/
   index.js          démarrage du serveur
   app.js            Express : sécurité, authentification, paramètres
-  db.js             schéma SQLite et données initiales
+  db.js             schémas SQLite et PostgreSQL, migrations, données initiales
+  database.js       accès aux données commun à SQLite et PostgreSQL (requêtes, transactions)
   routes/catalog.js familles, produits, tables, moyens de paiement
   routes/orders.js  commandes, ajouts d'articles, paiements, annulation, transfert
   routes/stats.js   tableau de bord et statistiques
@@ -143,6 +184,9 @@ Dans ces versions, l'impression affiche le ticket à l'écran (le lecteur claude
 ```bash
 npm test
 ```
+
+Chaque suite s'exécute trois fois : sur SQLite, sur PostgreSQL (PGlite, un vrai PostgreSQL compilé en
+WebAssembly) et sur PostgreSQL à travers le pilote `pg` et le protocole réseau, comme en production.
 
 ## Évolutions possibles
 

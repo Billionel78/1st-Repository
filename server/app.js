@@ -5,6 +5,7 @@ const express = require('express');
 const { HttpError, badRequest, toText } = require('./http');
 const { hashPassword, verifyPassword, newToken, createLoginLimiter } = require('./security');
 const { nowLocal } = require('./time');
+const { seed, hasUsers } = require('./db');
 const catalogRoutes = require('./routes/catalog');
 const orderRoutes = require('./routes/orders');
 const statsRoutes = require('./routes/stats');
@@ -26,12 +27,13 @@ function parseCookies(header = '') {
   return out;
 }
 
-function createApp(db, { secureCookies = false } = {}) {
+function createApp(db, { secureCookies = false, trustProxy = 'loopback' } = {}) {
   const app = express();
   const loginLimiter = createLoginLimiter();
 
   app.disable('x-powered-by');
-  app.set('trust proxy', 'loopback');
+  // Derrière l'hébergeur (Render…), un proxy transmet l'adresse réelle du client.
+  app.set('trust proxy', trustProxy);
 
   app.use((req, res, next) => {
     res.set({
@@ -45,20 +47,37 @@ function createApp(db, { secureCookies = false } = {}) {
   });
   app.use(express.json({ limit: '100kb' }));
 
-  // ---------- Authentification ----------
-  const findSession = db.prepare(`
-    SELECT u.id, u.username, u.full_name, u.role, u.active, s.expires_at
-    FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`);
+  // ---------- Première ouverture : création de l'établissement ----------
+  app.get('/api/platform', async (req, res) => {
+    res.json({ mode: 'server', status: (await hasUsers(db)) ? 'ready' : 'setup' });
+  });
 
-  app.use('/api', (req, res, next) => {
+  app.post('/api/platform/setup', async (req, res) => {
+    const barName = toText(req.body?.bar_name, "nom de l'établissement", { max: 60 });
+    const fullName = toText(req.body?.full_name, 'nom', { max: 80 });
+    const username = toText(req.body?.username, 'identifiant', { max: 50 });
+    const password = String(req.body?.password ?? '');
+    if (!/^[\w.-]{2,50}$/.test(username)) {
+      throw badRequest("L'identifiant doit contenir 2 à 50 lettres, chiffres, « . », « - » ou « _ ».");
+    }
+    if (password.length < 6) throw badRequest('Le mot de passe doit contenir au moins 6 caractères.');
+    const created = await seed(db, { adminUsername: username, adminFullName: fullName, adminPassword: password, barName });
+    if (!created) throw new HttpError(409, 'La plateforme est déjà configurée. Connectez-vous.');
+    res.status(201).json({ ok: true });
+  });
+
+  // ---------- Authentification ----------
+  app.use('/api', async (req, res, next) => {
     const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
     if (token) {
-      const row = findSession.get(token);
-      if (row && row.active && row.expires_at > Date.now()) {
+      const row = await db.get(`
+        SELECT u.id, u.username, u.full_name, u.role, u.active, s.expires_at
+        FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`, token);
+      if (row && row.active && Number(row.expires_at) > Date.now()) {
         req.user = { id: row.id, username: row.username, full_name: row.full_name, role: row.role };
         req.sessionToken = token;
       } else if (row) {
-        db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
+        await db.run('DELETE FROM sessions WHERE token = ?', token);
       }
     }
     next();
@@ -74,30 +93,29 @@ function createApp(db, { secureCookies = false } = {}) {
     });
   }
 
-  app.post('/api/auth/login', (req, res) => {
+  app.post('/api/auth/login', async (req, res) => {
     const username = toText(req.body?.username, "nom d'utilisateur", { max: 50 });
     const password = String(req.body?.password ?? '');
     const key = `${req.ip}|${username.toLowerCase()}`;
     if (loginLimiter.isBlocked(key)) {
       throw new HttpError(429, 'Trop de tentatives. Réessayez dans quelques minutes.');
     }
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+    const user = await db.get('SELECT * FROM users WHERE lower(username) = lower(?)', username);
     if (!user || !user.active || !verifyPassword(password, user.password_hash)) {
       loginLimiter.fail(key);
       throw new HttpError(401, "Nom d'utilisateur ou mot de passe incorrect.");
     }
     loginLimiter.reset(key);
-    db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
+    await db.run('DELETE FROM sessions WHERE expires_at <= ?', Date.now());
     const token = newToken();
-    db.prepare('INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)').run(
-      token, user.id, nowLocal(), Date.now() + SESSION_TTL_MS
-    );
+    await db.run('INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)',
+      token, user.id, nowLocal(), Date.now() + SESSION_TTL_MS);
     setSessionCookie(res, token, SESSION_TTL_MS);
     res.json({ user: { id: user.id, username: user.username, full_name: user.full_name, role: user.role } });
   });
 
-  app.post('/api/auth/logout', (req, res) => {
-    if (req.sessionToken) db.prepare('DELETE FROM sessions WHERE token = ?').run(req.sessionToken);
+  app.post('/api/auth/logout', async (req, res) => {
+    if (req.sessionToken) await db.run('DELETE FROM sessions WHERE token = ?', req.sessionToken);
     res.clearCookie(SESSION_COOKIE, { path: '/' });
     res.json({ ok: true });
   });
@@ -113,34 +131,32 @@ function createApp(db, { secureCookies = false } = {}) {
     next();
   };
 
-  app.get('/api/auth/me', (req, res) => {
-    res.json({ user: req.user, settings: readSettings(db) });
+  app.get('/api/auth/me', async (req, res) => {
+    res.json({ user: req.user, settings: await readSettings(db) });
   });
 
-  app.post('/api/auth/password', (req, res) => {
+  app.post('/api/auth/password', async (req, res) => {
     const current = String(req.body?.current_password ?? '');
     const next = String(req.body?.new_password ?? '');
     if (next.length < 6) throw badRequest('Le nouveau mot de passe doit contenir au moins 6 caractères.');
-    const user = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user.id);
+    const user = await db.get('SELECT password_hash FROM users WHERE id = ?', req.user.id);
     if (!verifyPassword(current, user.password_hash)) throw badRequest('Mot de passe actuel incorrect.');
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(next), req.user.id);
+    await db.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(next), req.user.id);
     // Déconnecte les autres appareils.
-    db.prepare('DELETE FROM sessions WHERE user_id = ? AND token <> ?').run(req.user.id, req.sessionToken);
+    await db.run('DELETE FROM sessions WHERE user_id = ? AND token <> ?', req.user.id, req.sessionToken);
     res.json({ ok: true });
   });
 
   // ---------- Paramètres ----------
-  app.get('/api/settings', (req, res) => res.json(readSettings(db)));
+  app.get('/api/settings', async (req, res) => res.json(await readSettings(db)));
 
-  app.put('/api/settings', requireAdmin, (req, res) => {
-    const upsert = db.prepare(
-      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-    );
+  app.put('/api/settings', requireAdmin, async (req, res) => {
+    const upsert = 'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value';
     const barName = toText(req.body?.bar_name, 'nom du bar', { max: 60, optional: true });
     const currency = toText(req.body?.currency, 'devise', { max: 10, optional: true });
-    if (barName !== undefined) upsert.run('bar_name', barName);
-    if (currency !== undefined) upsert.run('currency', currency);
-    res.json(readSettings(db));
+    if (barName !== undefined) await db.run(upsert, 'bar_name', barName);
+    if (currency !== undefined) await db.run(upsert, 'currency', currency);
+    res.json(await readSettings(db));
   });
 
   catalogRoutes(app, db, { requireAdmin });
@@ -168,9 +184,9 @@ function createApp(db, { secureCookies = false } = {}) {
   return app;
 }
 
-function readSettings(db) {
+async function readSettings(db) {
   const out = { bar_name: 'ICE MANAGER', currency: 'FCFA' };
-  for (const row of db.prepare('SELECT key, value FROM settings').all()) out[row.key] = row.value;
+  for (const row of await db.all('SELECT key, value FROM settings')) out[row.key] = row.value;
   return out;
 }
 

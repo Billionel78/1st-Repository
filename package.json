@@ -5,7 +5,7 @@
   "main": "server/index.js",
   "private": true,
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning server/index.js",
@@ -15,9 +15,12 @@
   },
   "license": "UNLICENSED",
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "pg": "^8.16.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.3.7",
+    "@electric-sql/pglite-socket": "^0.0.12",
     "sql.js": "^1.10.3"
   }
 }

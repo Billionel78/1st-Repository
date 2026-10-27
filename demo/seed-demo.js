@@ -3,7 +3,6 @@
 // Données d'exemple de la démo : un serveur, des prix d'achat, du stock et une semaine de ventes.
 // Les ventes sont générées de façon déterministe pour que la démo soit identique à chaque réinitialisation.
 
-const { transaction } = require('../server/db');
 const { hashPassword } = require('../server/security');
 const { applyStockMovement } = require('../server/stock');
 const { nowLocal } = require('../server/time');
@@ -16,49 +15,49 @@ function rng(seed) {
   };
 }
 
-function seedDemo(db) {
+async function seedDemo(db) {
   const random = rng(20261026);
   const pick = (list) => list[Math.floor(random() * list.length)];
   const now = new Date();
   const at = (date) => nowLocal(date);
 
-  transaction(db, () => {
-    db.prepare('INSERT INTO users (username, full_name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)')
-      .run('awa', 'Awa (serveuse)', hashPassword('serveur1'), 'serveur', at(now));
+  await db.transaction(async (tx) => {
+    await tx.run('INSERT INTO users (username, full_name, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)',
+      'awa', 'Awa (serveuse)', hashPassword('serveur1'), 'serveur', at(now));
 
     // Prix d'achat ≈ 60 % du prix de vente ; suivi du stock sur les bières et les sucreries.
-    const products = db.prepare(`SELECT p.*, f.name AS family_name FROM products p JOIN families f ON f.id = p.family_id`).all();
+    const products = await tx.all('SELECT p.*, f.name AS family_name FROM products p JOIN families f ON f.id = p.family_id');
     const start = new Date(now);
     start.setDate(start.getDate() - 7);
     start.setHours(10, 0, 0, 0);
     for (const p of products) {
       const cost = Math.round((p.price * 0.6) / 50) * 50;
       const tracked = ['Bières', 'Sucreries'].includes(p.family_name);
-      db.prepare('UPDATE products SET cost_price = ?, track_stock = ?, alert_threshold = ? WHERE id = ?')
-        .run(cost, tracked ? 1 : 0, tracked ? 12 : 0, p.id);
+      await tx.run('UPDATE products SET cost_price = ?, track_stock = ?, alert_threshold = ? WHERE id = ?',
+        cost, tracked ? 1 : 0, tracked ? 12 : 0, p.id);
       p.cost_price = cost;
       p.track_stock = tracked;
       if (tracked) {
         const qty = p.name === 'Guinness' ? 60 : 150;
-        applyStockMovement(db, { productId: p.id, type: 'entree', delta: qty, unitCost: cost, note: 'Livraison fournisseur', userId: 1, at: at(start) });
+        await applyStockMovement(tx, { productId: p.id, type: 'entree', delta: qty, unitCost: cost, note: 'Livraison fournisseur', userId: 1, at: at(start) });
       }
     }
 
-    const tables = db.prepare('SELECT * FROM bar_tables ORDER BY position').all();
-    const methods = db.prepare('SELECT * FROM payment_methods').all();
+    const tables = await tx.all('SELECT * FROM bar_tables ORDER BY position');
+    const methods = await tx.all('SELECT * FROM payment_methods');
     const cash = methods.find((m) => m.type === 'cash');
     const mobile = methods.filter((m) => m.type === 'mobile_money');
     // Les bières se vendent le plus.
     const weighted = products.flatMap((p) => Array(p.family_name === 'Bières' ? 6 : p.family_name === 'Sucreries' ? 3 : 1).fill(p));
 
-    const insOrder = db.prepare(`INSERT INTO orders (number, table_id, table_name, status, total, paid_amount, created_by,
-      created_at, updated_at, closed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    const insItem = db.prepare(`INSERT INTO order_items (order_id, product_id, product_name, family_name, unit_price, unit_cost,
-      quantity, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    const insPay = db.prepare(`INSERT INTO payments (order_id, method_id, method_name, method_type, amount, received_amount,
-      change_amount, reference, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const INS_ORDER = `INSERT INTO orders (number, table_id, table_name, status, total, paid_amount, created_by,
+      created_at, updated_at, closed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const INS_ITEM = `INSERT INTO order_items (order_id, product_id, product_name, family_name, unit_price, unit_cost,
+      quantity, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const INS_PAY = `INSERT INTO payments (order_id, method_id, method_name, method_type, amount, received_amount,
+      change_amount, reference, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
-    function createOrder(opened, table, seq, { paid, closed }) {
+    async function createOrder(opened, table, seq, { paid, closed }) {
       const day = at(opened).slice(0, 10).replaceAll('-', '');
       const lines = new Map();
       const count = 1 + Math.floor(random() * 3);
@@ -68,16 +67,18 @@ function seedDemo(db) {
       }
       const total = [...lines].reduce((s, [p, q]) => s + p.price * q, 0);
       const userId = random() < 0.6 ? 2 : 1;
-      const orderId = Number(insOrder.run(`CMD-${day}-${String(seq).padStart(4, '0')}`, table.id, table.name,
-        paid ? 'paid' : 'open', total, paid ? total : 0, userId, at(opened), at(closed ?? opened), paid ? at(closed) : null).lastInsertRowid);
-      for (const [p, q] of lines) insItem.run(orderId, p.id, p.name, p.family_name, p.price, p.cost_price, q, at(opened), at(opened));
+      const { lastInsertRowid: orderId } = await tx.run(INS_ORDER, `CMD-${day}-${String(seq).padStart(4, '0')}`, table.id,
+        table.name, paid ? 'paid' : 'open', total, paid ? total : 0, userId, at(opened), at(closed ?? opened), paid ? at(closed) : null);
+      for (const [p, q] of lines) {
+        await tx.run(INS_ITEM, orderId, p.id, p.name, p.family_name, p.price, p.cost_price, q, at(opened), at(opened));
+      }
       if (!paid) return;
       const method = random() < 0.6 ? cash : pick(mobile);
       const received = method.type === 'cash' ? Math.ceil(total / 1000) * 1000 + (random() < 0.3 ? 1000 : 0) : null;
-      insPay.run(orderId, method.id, method.name, method.type, total, received, received === null ? null : received - total,
+      await tx.run(INS_PAY, orderId, method.id, method.name, method.type, total, received, received === null ? null : received - total,
         method.type === 'cash' ? null : `TX${Math.floor(random() * 1e8)}`, userId, at(closed));
       for (const [p, q] of lines) {
-        if (p.track_stock) applyStockMovement(db, { productId: p.id, type: 'vente', delta: -q, orderId, userId, at: at(closed) });
+        if (p.track_stock) await applyStockMovement(tx, { productId: p.id, type: 'vente', delta: -q, orderId, userId, at: at(closed) });
       }
     }
 
@@ -91,7 +92,7 @@ function seedDemo(db) {
         opened.setHours(18, Math.floor(random() * 300), 0, 0);
         const closed = new Date(opened.getTime() + (20 + random() * 70) * 60000);
         if (closed.getDate() !== opened.getDate()) closed.setTime(opened.getTime() + 5 * 60000);
-        createOrder(opened, pick(tables), n, { paid: true, closed });
+        await createOrder(opened, pick(tables), n, { paid: true, closed });
       }
     }
 
@@ -104,7 +105,7 @@ function seedDemo(db) {
       const open = n <= 3;
       if (!open && minutesToday < 120) continue;
       const opened = new Date(Math.max(now.getTime() - n * step * 60000, midnight.getTime()));
-      createOrder(opened, tables[open ? n - 1 : 3 + (n % 4)], 8 - n,
+      await createOrder(opened, tables[open ? n - 1 : 3 + (n % 4)], 8 - n,
         open ? { paid: false } : { paid: true, closed: new Date(opened.getTime() + Math.min(15, step) * 60000) });
     }
   });
