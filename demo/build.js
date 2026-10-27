@@ -17,7 +17,7 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 const MODULES = [
   'server/app.js', 'server/db.js', 'server/database.js', 'server/http.js', 'server/time.js', 'server/stock.js',
   'server/routes/catalog.js', 'server/routes/orders.js', 'server/routes/stats.js', 'server/routes/users.js',
-  'server/routes/stock.js', 'server/routes/reports.js',
+  'server/routes/stock.js', 'server/routes/reports.js', 'server/routes/customers.js',
   'demo/main.js', 'demo/seed-demo.js', 'demo/shared-store.js',
   'demo/shims/express.js', 'demo/shims/sqlite.js', 'demo/shims/security.js',
 ];

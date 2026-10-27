@@ -551,10 +551,11 @@ const NAV = [
   { href: '#/', icon: '🏠', label: 'Accueil', match: /^#\/(famille\/\d+)?$/ },
   { href: '#/tables', icon: '🪑', label: 'Tables', match: /^#\/tables/ },
   { href: '#/commandes', icon: '🧾', label: 'Commandes', short: 'Cmdes', match: /^#\/commande/, badge: 'open-count' },
+  { href: '#/clients', icon: '👥', label: 'Clients', match: /^#\/clients?/ },
   { href: '#/historique', icon: '📅', label: 'Historique', short: 'Histo.', match: /^#\/historique/ },
   { href: '#/statistiques', icon: '📊', label: 'Statistiques', short: 'Stats', match: /^#\/statistiques/, admin: true },
   { href: '#/stock', icon: '📦', label: 'Stock', match: /^#\/stock/, admin: true, badge: 'stock-alerts' },
-  { href: '#/gestion', icon: '⚙️', label: 'Gestion', match: /^#\/gestion/, admin: true },
+  { href: '#/gestion', icon: '⚙️', label: 'Gestion', short: 'Gérer', match: /^#\/gestion/, admin: true },
 ];
 
 function renderNav() {
@@ -592,6 +593,8 @@ const ROUTES = [
   [/^#\/commandes$/, (m, seq) => renderOrders(m, seq)],
   [/^#\/commande\/(\d+)$/, (m, seq) => renderOrder(Number(m[1]), seq)],
   [/^#\/historique$/, (m, seq) => renderHistory(m, seq)],
+  [/^#\/clients$/, (m, seq) => renderCustomers(m, seq)],
+  [/^#\/client\/(\d+)$/, (m, seq) => renderCustomer(Number(m[1]), seq)],
   [/^#\/statistiques$/, (m, seq) => renderStats(m, seq), true],
   [/^#\/stock$/, (m, seq) => renderStock(m, seq), true],
   [/^#\/gestion(?:\/(\w+))?$/, (m, seq) => renderAdmin(m[1] || 'produits', seq), true],
@@ -642,7 +645,7 @@ function stopRefresh() {
 function activeTableBanner() {
   if (!state.activeTable) return '';
   return `<div class="banner" id="active-table-banner">
-    <span>🪑 Commande en cours de saisie pour <strong>${esc(state.activeTable.name)}</strong></span>
+    <span>🪑 Commande en cours de saisie pour <strong>${esc(state.activeTable.name)}</strong>${state.activeTable.customerName ? ` · 👤 ${esc(state.activeTable.customerName)}` : ''}</span>
     <span class="spacer"></span>
     ${state.activeTable.orderId ? `<a class="btn btn-sm" href="#/commande/${state.activeTable.orderId}">Voir la commande</a>` : ''}
     <button class="btn btn-sm" type="button" data-clear-table>Terminer</button>
@@ -667,6 +670,7 @@ function orderCard(o) {
   return `<a class="order-card" href="#/commande/${o.id}">
     <div class="row"><span class="table-name">${esc(o.table_name)}</span><span class="spacer"></span>${statusBadge(o.status)}</div>
     <div class="muted small">${esc(o.number)} · ouverte à ${fmtTime(o.created_at)}</div>
+    ${o.customer_name ? `<div class="order-customer">👤 ${esc(o.customer_name)}</div>` : ''}
     <div class="small">${o.items.map((i) => `${i.quantity} × ${esc(i.product_name)}`).join(', ') || '<span class="muted">Aucun article</span>'}</div>
     <div class="row"><span class="muted small">Reste à payer</span><span class="spacer"></span><span class="amount">${money(o.remaining)}</span></div>
     ${o.paid_amount > 0 ? `<div class="muted small">Déjà payé : ${money(o.paid_amount)} sur ${money(o.total)}</div>` : ''}
@@ -818,11 +822,18 @@ async function renderFamily(familyId, seq) {
 
 async function openOrderModal(product) {
   let tables;
-  try { tables = await api('GET', '/api/tables'); } catch (err) { toast(err.message, 'err'); return; }
+  let customers;
+  try {
+    [tables, customers] = await Promise.all([api('GET', '/api/tables'), api('GET', '/api/customers')]);
+  } catch (err) { toast(err.message, 'err'); return; }
   if (!tables.length) { toast('Aucune table configurée.', 'err'); return; }
   const free = product.track_stock ? product.stock - product.reserved : Infinity;
   let tableId = tables.some((t) => t.id === state.activeTable?.id) ? state.activeTable.id : null;
+  let customerId = state.activeTable?.customerId ?? null;
   let qty = 1;
+
+  const customerOptions = () => `<option value="">— Aucun client —</option>${customers.map((c) =>
+    `<option value="${c.id}">${esc(c.name)}${c.phone ? ` · ${esc(c.phone)}` : ''}${c.table_name ? ` (${esc(c.table_name)})` : ''}</option>`).join('')}`;
 
   const modal = openModal({
     title: `${esc(product.name)} <span class="muted small">· ${money(product.price)}</span>`,
@@ -834,10 +845,24 @@ async function openOrderModal(product) {
           <button type="button" class="tile tile-table ${t.order_id ? 'busy' : ''}" data-id="${t.id}">
             <span class="tile-name">${esc(t.name)}</span>
             <span class="tile-meta">${t.order_id ? `Ouverte · ${money(t.order_total)}` : 'Libre'}</span>
+            ${t.order_customer_name ? `<span class="tile-meta">👤 ${esc(t.order_customer_name)}</span>` : ''}
           </button>`).join('')}</div>
       </div>
       <div>
-        <div class="step-title">2. Quantité</div>
+        <div class="step-title">2. Client <span class="muted">(facultatif)</span></div>
+        <div class="customer-pick">
+          <select id="pick-customer" aria-label="Client">${customerOptions()}</select>
+          <button class="btn" type="button" id="new-customer-btn">＋ Nouveau client</button>
+        </div>
+        <p class="muted small" id="customer-note" hidden></p>
+        <div class="customer-new" id="new-customer" hidden>
+          <input id="new-customer-name" maxlength="80" placeholder="Nom du client" aria-label="Nom du client">
+          <input id="new-customer-phone" maxlength="30" inputmode="tel" placeholder="Téléphone (facultatif)" aria-label="Téléphone">
+          <button class="btn btn-primary" type="button" id="new-customer-save">Enregistrer</button>
+        </div>
+      </div>
+      <div>
+        <div class="step-title">3. Quantité</div>
         <div class="stepper">
           <button class="btn" type="button" data-step="-1" aria-label="Diminuer">−</button>
           <input id="qty" type="number" min="1" step="1" inputmode="numeric" value="1" aria-label="Quantité">
@@ -853,11 +878,22 @@ async function openOrderModal(product) {
   });
 
   const qtyInput = $('#qty', modal);
+  const select = $('#pick-customer', modal);
   const update = () => {
     $$('#pick-tables .tile', modal).forEach((b) => b.classList.toggle('selected', Number(b.dataset.id) === tableId));
     const table = tables.find((t) => t.id === tableId);
+    // Une table déjà ouverte au nom d'un client garde ce client.
+    const locked = table?.order_customer_id ? table : null;
+    if (locked) customerId = locked.order_customer_id;
+    select.value = customerId ?? '';
+    select.disabled = !!locked;
+    $('#new-customer-btn', modal).disabled = !!locked;
+    const note = $('#customer-note', modal);
+    note.hidden = !locked;
+    if (locked) note.textContent = `${table.name} : commande en cours de ${table.order_customer_name}.`;
+    const customer = customers.find((c) => c.id === customerId);
     $('#order-summary', modal).textContent = table
-      ? `${qty} × ${product.name} → ${table.name}${table.order_id ? ' (ajout à la commande ouverte)' : ' (nouvelle commande)'}`
+      ? `${qty} × ${product.name} → ${table.name}${customer ? ` · ${customer.name}` : ''}${table.order_id ? ' (ajout à la commande ouverte)' : ' (nouvelle commande)'}`
       : 'Sélectionnez une table';
     $('#order-amount', modal).textContent = money(qty * product.price);
     $('#order-validate', modal).disabled = !table || !(qty >= 1);
@@ -867,7 +903,41 @@ async function openOrderModal(product) {
     qtyInput.value = qty;
     update();
   };
-  $$('#pick-tables .tile', modal).forEach((b) => b.addEventListener('click', () => { tableId = Number(b.dataset.id); update(); }));
+  /** Choisir un client place la commande sur sa table habituelle (si aucune table n'est encore choisie). */
+  const chooseCustomer = (id) => {
+    customerId = id;
+    const c = customers.find((x) => x.id === id);
+    const home = c?.table_id && tables.find((t) => t.id === c.table_id);
+    if (home && (!tableId || !tables.find((t) => t.id === tableId)?.order_id)
+      && (!home.order_customer_id || home.order_customer_id === id)) tableId = home.id;
+    update();
+  };
+  $$('#pick-tables .tile', modal).forEach((b) => b.addEventListener('click', () => {
+    const before = tables.find((t) => t.id === tableId);
+    tableId = Number(b.dataset.id);
+    // En quittant une table verrouillée sur un client, on ne garde pas ce client par erreur.
+    if (before?.order_customer_id && before.order_customer_id === customerId) customerId = null;
+    update();
+  }));
+  select.addEventListener('change', () => chooseCustomer(select.value ? Number(select.value) : null));
+  $('#new-customer-btn', modal).addEventListener('click', () => {
+    const box = $('#new-customer', modal);
+    box.hidden = !box.hidden;
+    if (!box.hidden) $('#new-customer-name', modal).focus();
+  });
+  $('#new-customer-save', modal).addEventListener('click', async () => {
+    const name = $('#new-customer-name', modal).value.trim();
+    if (!name) { $('#order-error', modal).textContent = 'Indiquez le nom du client.'; return; }
+    try {
+      const c = await api('POST', '/api/customers', { name, phone: $('#new-customer-phone', modal).value.trim() || undefined });
+      customers = [...customers, c].sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+      select.innerHTML = customerOptions();
+      $('#new-customer', modal).hidden = true;
+      $('#order-error', modal).textContent = '';
+      chooseCustomer(c.id);
+      toast(`Client « ${c.name} » enregistré.`, 'ok');
+    } catch (err) { $('#order-error', modal).textContent = err.message; }
+  });
   $$('[data-step]', modal).forEach((b) => b.addEventListener('click', () => setQty(qty + Number(b.dataset.step))));
   $$('[data-qty]', modal).forEach((b) => b.addEventListener('click', () => setQty(Number(b.dataset.qty))));
   qtyInput.addEventListener('input', () => { qty = Math.floor(Number(qtyInput.value)); update(); });
@@ -878,11 +948,13 @@ async function openOrderModal(product) {
     const btn = e.currentTarget;
     btn.disabled = true;
     try {
-      const res = await api('POST', '/api/orders', { table_id: tableId, product_id: product.id, quantity: qty });
+      const res = await api('POST', '/api/orders', {
+        table_id: tableId, product_id: product.id, quantity: qty, customer_id: customerId ?? undefined,
+      });
       const o = res.order;
-      state.activeTable = { id: o.table_id, name: o.table_name, orderId: o.id };
+      state.activeTable = { id: o.table_id, name: o.table_name, orderId: o.id, customerId: o.customer_id, customerName: o.customer_name };
       closeModal();
-      toast(`${res.created ? 'Commande créée' : 'Ajouté à la commande'} ${o.number} – ${o.table_name} : ${qty} × ${product.name}. Total ${money(o.total)}`, 'ok');
+      toast(`${res.created ? 'Commande créée' : 'Ajouté à la commande'} ${o.number} – ${o.table_name}${o.customer_name ? ` (${o.customer_name})` : ''} : ${qty} × ${product.name}. Total ${money(o.total)}`, 'ok');
       route(); // rafraîchit stocks et bandeau
     } catch (err) {
       $('#order-error', modal).textContent = err.message;
@@ -907,7 +979,7 @@ async function renderTables(m, seq) {
         <button type="button" class="tile tile-table ${t.order_id ? 'busy' : ''}" data-id="${t.id}">
           <span class="tile-name">${esc(t.name)}</span>
           ${t.order_id
-            ? `<span class="tile-meta">${esc(t.order_number)}<br>Total ${money(t.order_total)}<br><strong>Reste ${money(t.order_total - t.order_paid)}</strong></span>`
+            ? `<span class="tile-meta">${t.order_customer_name ? `👤 ${esc(t.order_customer_name)}<br>` : ''}${esc(t.order_number)}<br>Total ${money(t.order_total)}<br><strong>Reste ${money(t.order_total - t.order_paid)}</strong></span>`
             : '<span class="tile-meta">Libre – toucher pour commander</span>'}
         </button>`).join('')}</div>` : '<div class="empty">Aucune table.</div>'}`;
     $$('.tile-table', view).forEach((b) => b.addEventListener('click', () => {
@@ -963,6 +1035,10 @@ async function renderOrder(id, seq) {
         <div><h1>${esc(order.table_name)} · ${esc(order.number)}</h1>
           <div class="muted small">Ouverte le ${fmtDateTime(order.created_at)}${order.created_by_name ? ` par ${esc(order.created_by_name)}` : ''}
           ${order.closed_at ? ` · ${order.status === 'paid' ? 'Payée' : 'Annulée'} le ${fmtDateTime(order.closed_at)}` : ''}</div>
+          <div class="order-customer-line">${order.customer_id
+            ? `👤 Client : <a href="#/client/${order.customer_id}">${esc(order.customer_name)}</a>`
+            : order.customer_name ? `👤 Client : ${esc(order.customer_name)}` : '<span class="muted">Aucun client</span>'}
+            ${open || isAdmin() ? `<button class="btn btn-sm" type="button" id="customer-btn">${order.customer_name ? 'Changer' : '＋ Associer un client'}</button>` : ''}</div>
         </div>
       </div>
       <div>${statusBadge(order.status)}</div>
@@ -1022,10 +1098,11 @@ async function renderOrder(id, seq) {
   }));
   $('#pay-btn', view)?.addEventListener('click', () => openPaymentModal(order));
   $('#add-btn', view)?.addEventListener('click', () => {
-    state.activeTable = { id: order.table_id, name: order.table_name, orderId: order.id };
+    state.activeTable = { id: order.table_id, name: order.table_name, orderId: order.id, customerId: order.customer_id, customerName: order.customer_name };
     location.hash = '#/';
   });
   $('#transfer-btn', view)?.addEventListener('click', () => openTransferModal(order));
+  $('#customer-btn', view)?.addEventListener('click', () => openOrderCustomerModal(order));
   $('#print-btn', view)?.addEventListener('click', () => printTicket(order));
   $('#cancel-btn', view)?.addEventListener('click', () => formModal({
     title: `Annuler la commande ${order.number}`,
@@ -1051,6 +1128,7 @@ function printTicket(order) {
     <hr>
     <div>Commande : ${esc(order.number)}</div>
     <div>Table : ${esc(order.table_name)}</div>
+    ${order.customer_name ? `<div>Client : ${esc(order.customer_name)}</div>` : ''}
     <div>Date : ${fmtDateTime(paid ? order.closed_at : nowString())}</div>
     <hr>
     ${order.items.map((i) => `<div class="t-line"><span>${i.quantity} × ${esc(i.product_name)}</span><span>${nf.format(i.amount)}</span></div>
@@ -1245,11 +1323,11 @@ async function renderHistory(m, seq) {
       ${kpi('Montant des commandes payées', money(paidOrders.reduce((s, o) => s + o.total, 0)))}
     </div>
     ${orders.length ? `<div class="table-wrap"><table class="data">
-      <thead><tr><th>Heure</th><th>N°</th><th>Table</th><th>Produits</th><th class="right">Total</th><th>Paiement</th><th>Statut</th></tr></thead>
+      <thead><tr><th>Heure</th><th>N°</th><th>Table / client</th><th>Produits</th><th class="right">Total</th><th>Paiement</th><th>Statut</th></tr></thead>
       <tbody>${orders.map((o) => `<tr class="clickable" data-id="${o.id}">
         <td class="num">${fmtTime(o.created_at)}</td>
         <td class="num">${esc(o.number)}</td>
-        <td>${esc(o.table_name)}</td>
+        <td>${esc(o.table_name)}${o.customer_name ? `<br><span class="muted small">👤 ${esc(o.customer_name)}</span>` : ''}</td>
         <td class="small">${o.items.map((i) => `${i.quantity} × ${esc(i.product_name)}`).join('<br>')}</td>
         <td class="right num"><strong>${money(o.total)}</strong></td>
         <td class="small">${o.payment_methods.map((p) => `${esc(p.method_name)}${o.payment_methods.length > 1 ? ` (${money(p.amount)})` : ''}`).join('<br>') || '—'}</td>
@@ -1388,6 +1466,12 @@ async function renderStats(m, seq) {
         <tfoot><tr><td colspan="2">Total encaissé</td><td class="right num">${s.payments_count}</td><td class="right num">${money(s.collected)}</td></tr></tfoot>
       </table></div>` : '<div class="empty">Aucun encaissement sur cette période.</div>'}
     </div>
+
+    ${s.top_customers.length ? `<div class="section">
+      <h2>👥 Meilleurs clients</h2>
+      <div class="card">${barList(s.top_customers, { label: (c) => c.name, value: (c) => c.amount, format: (v) => money(v),
+        title: (c) => `${c.name} : ${money(c.amount)} – ${c.orders} commande(s) payée(s)` })}</div>
+    </div>` : ''}
 
     ${s.by_user.length ? `<div class="section">
       <h2>👤 Encaissements par utilisateur</h2>
@@ -1557,6 +1641,154 @@ async function renderStock(m, seq) {
       openModal({ title: `Historique du stock · ${esc(p.name)}`, wide: true, body: movementsTable(list, { showProduct: false }) });
     } catch (err) { toast(err.message, 'err'); }
   }));
+}
+
+/* =====================================================================
+ * Clients
+ * ===================================================================== */
+const customerFilter = { q: '' };
+
+/** Formulaire client (création ou modification). Résout le client enregistré. */
+async function openCustomerForm(customer = null) {
+  let tables = [];
+  try { tables = await api('GET', '/api/tables'); } catch { /* liste vide : pas de table habituelle */ }
+  return new Promise((resolve) => {
+    formModal({
+      title: customer ? `Modifier « ${customer.name} »` : 'Nouveau client',
+      fields: [
+        { name: 'name', label: 'Nom du client', required: true, value: customer?.name, maxlength: 80, autocomplete: 'off' },
+        { name: 'phone', label: 'Téléphone (facultatif)', value: customer?.phone, maxlength: 30, placeholder: 'Ex. : +225 07 00 00 00' },
+        { name: 'table_id', label: 'Table habituelle (facultatif)', type: 'select', value: customer?.table_id ?? '',
+          options: [{ value: '', label: '— Aucune —' }, ...tables.map((t) => ({ value: t.id, label: t.name }))] },
+        { name: 'notes', label: 'Notes (facultatif)', value: customer?.notes, maxlength: 300, placeholder: 'Ex. : préfère la Castel bien fraîche' },
+      ],
+      submitLabel: customer ? 'Enregistrer' : 'Créer le client',
+      onSubmit: async (v) => {
+        const payload = { ...v, table_id: v.table_id ? Number(v.table_id) : null };
+        const saved = customer
+          ? await api('PUT', `/api/customers/${customer.id}`, payload)
+          : await api('POST', '/api/customers', payload);
+        toast(customer ? 'Client modifié.' : `Client « ${saved.name} » enregistré.`, 'ok');
+        resolve(saved);
+      },
+    });
+  });
+}
+
+/** Commencer une commande pour un client : sa table habituelle est présélectionnée. */
+function startOrderFor(c) {
+  state.activeTable = c.table_id
+    ? { id: c.table_id, name: c.table_name, customerId: c.id, customerName: c.name }
+    : { id: null, name: 'une table à choisir', customerId: c.id, customerName: c.name };
+  location.hash = '#/';
+}
+
+async function renderCustomers(m, seq) {
+  const customers = await api('GET', '/api/customers');
+  if (seq !== renderSeq) return;
+  const view = $('#view');
+  view.innerHTML = `
+    <div class="page-head">
+      <div><h1>Clients</h1><div class="muted">${customers.length} client(s) enregistré(s)</div></div>
+      <div class="actions"><button class="btn btn-primary" type="button" id="add-customer">＋ Nouveau client</button></div>
+    </div>
+    <div class="filters">
+      <label>Rechercher<input type="search" id="customer-search" placeholder="Nom ou téléphone" value="${esc(customerFilter.q)}"></label>
+    </div>
+    <div id="customer-list"></div>`;
+  const paint = () => {
+    const q = customerFilter.q.trim().toLowerCase();
+    const list = q ? customers.filter((c) => c.name.toLowerCase().includes(q) || (c.phone || '').includes(q)) : customers;
+    $('#customer-list', view).innerHTML = list.length ? `<div class="customer-grid">${list.map((c) => `
+      <a class="customer-card" href="#/client/${c.id}">
+        <div class="row"><strong class="customer-name">${esc(c.name)}</strong><span class="spacer"></span>
+          ${c.open_order_id ? '<span class="badge badge-open">Commande en cours</span>' : ''}</div>
+        <div class="muted small">${[c.phone ? `📞 ${esc(c.phone)}` : '', c.table_name ? `🪑 ${esc(c.table_name)}` : ''].filter(Boolean).join(' · ') || '&nbsp;'}</div>
+        <div class="customer-stats">
+          <span><strong class="num">${c.visits}</strong> visite(s)</span>
+          <span><strong class="num">${money(c.total_spent)}</strong></span>
+          <span class="muted">${c.last_visit ? `Dernière : ${fmtDate(c.last_visit)}` : 'Pas encore venu'}</span>
+        </div>
+      </a>`).join('')}</div>`
+      : `<div class="empty">${customers.length ? 'Aucun client ne correspond à la recherche.' : 'Aucun client enregistré. Ajoutez vos habitués avec « Nouveau client ».'}</div>`;
+  };
+  paint();
+  $('#customer-search', view).addEventListener('input', (e) => { customerFilter.q = e.target.value; paint(); });
+  $('#add-customer', view).addEventListener('click', async () => {
+    const c = await openCustomerForm();
+    location.hash = `#/client/${c.id}`;
+  });
+}
+
+async function renderCustomer(id, seq) {
+  const c = await api('GET', `/api/customers/${id}`);
+  if (seq !== renderSeq) return;
+  const view = $('#view');
+  view.innerHTML = `
+    <div class="page-head">
+      <div class="row">
+        <a class="btn btn-icon" href="#/clients" aria-label="Retour">←</a>
+        <div><h1>👤 ${esc(c.name)}</h1><div class="muted small">Client depuis le ${fmtDate(c.created_at)}</div></div>
+      </div>
+      <div class="actions">
+        ${c.open_order_id
+          ? `<a class="btn btn-primary" href="#/commande/${c.open_order_id}">🧾 Voir sa commande en cours</a>`
+          : '<button class="btn btn-primary" type="button" id="order-for">＋ Prendre une commande</button>'}
+        <button class="btn" type="button" id="edit-customer">Modifier</button>
+        ${isAdmin() ? '<button class="btn btn-danger" type="button" id="delete-customer">Supprimer</button>' : ''}
+      </div>
+    </div>
+    <div class="kpis">
+      ${kpi('Total dépensé', money(c.total_spent), 'Commandes payées', true)}
+      ${kpi('Visites', c.visits)}
+      ${kpi('Dernière visite', c.last_visit ? fmtDate(c.last_visit) : '—')}
+      ${kpi('Panier moyen', c.visits ? money(Math.round(c.total_spent / c.visits)) : '—')}
+    </div>
+    <div class="card section customer-info">
+      <div><span class="muted small">Téléphone</span><br>${c.phone ? esc(c.phone) : '—'}</div>
+      <div><span class="muted small">Table habituelle</span><br>${c.table_name ? esc(c.table_name) : '—'}</div>
+      <div class="customer-notes"><span class="muted small">Notes</span><br>${c.notes ? esc(c.notes) : '—'}</div>
+    </div>
+    <div class="section">
+      <h2>🧾 Ses commandes</h2>
+      ${c.orders.length ? `<div class="table-wrap"><table class="data">
+        <thead><tr><th>Date</th><th>N°</th><th>Table</th><th class="right">Total</th><th>Statut</th></tr></thead>
+        <tbody>${c.orders.map((o) => `<tr class="clickable" data-id="${o.id}">
+          <td class="num">${fmtDateTime(o.created_at)}</td><td class="num">${esc(o.number)}</td><td>${esc(o.table_name)}</td>
+          <td class="right num"><strong>${money(o.total)}</strong></td><td>${statusBadge(o.status)}</td></tr>`).join('')}</tbody>
+      </table></div>` : '<div class="empty">Aucune commande pour ce client.</div>'}
+    </div>`;
+  $$('tr[data-id]', view).forEach((tr) => tr.addEventListener('click', () => { location.hash = `#/commande/${tr.dataset.id}`; }));
+  $('#order-for', view)?.addEventListener('click', () => startOrderFor(c));
+  $('#edit-customer', view).addEventListener('click', async () => { await openCustomerForm(c); route(); });
+  $('#delete-customer', view)?.addEventListener('click', async () => {
+    if (!(await confirmModal('Supprimer le client', `Supprimer la fiche de « ${esc(c.name)} » ? Son nom reste visible sur ses anciennes commandes.`,
+      { confirmLabel: 'Supprimer', danger: true }))) return;
+    try {
+      await api('DELETE', `/api/customers/${c.id}`);
+      toast('Client supprimé.', 'ok');
+      location.hash = '#/clients';
+    } catch (err) { toast(err.message, 'err'); }
+  });
+}
+
+/** Associer, changer ou retirer le client d'une commande. */
+async function openOrderCustomerModal(order) {
+  let customers;
+  try { customers = await api('GET', '/api/customers'); } catch (err) { toast(err.message, 'err'); return; }
+  formModal({
+    title: `Client de la commande ${order.number}`,
+    fields: [{
+      name: 'customer_id', label: 'Client', type: 'select', value: order.customer_id ?? '',
+      options: [{ value: '', label: '— Aucun client —' }, ...customers.map((c) => ({ value: c.id, label: c.phone ? `${c.name} · ${c.phone}` : c.name }))],
+      hint: 'Pour un nouveau client, créez-le d’abord dans l’écran Clients (ou à la prise de commande).',
+    }],
+    onSubmit: async (v) => {
+      await api('PUT', `/api/orders/${order.id}/customer`, { customer_id: v.customer_id ? Number(v.customer_id) : null });
+      toast('Client de la commande mis à jour.', 'ok');
+      route();
+    },
+  });
 }
 
 /* =====================================================================

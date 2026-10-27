@@ -8,6 +8,7 @@ const { nowLocal, todayLocal, isIsoDate } = require('./time');
 const { seed, hasUsers } = require('./db');
 const catalogRoutes = require('./routes/catalog');
 const orderRoutes = require('./routes/orders');
+const customerRoutes = require('./routes/customers');
 const statsRoutes = require('./routes/stats');
 const userRoutes = require('./routes/users');
 const stockRoutes = require('./routes/stock');
@@ -178,7 +179,8 @@ function createApp(db, { secureCookies = false, trustProxy = 'loopback' } = {}) 
   });
 
   catalogRoutes(app, db, { requireAdmin });
-  orderRoutes(app, db, { requireAdmin });
+  const customers = customerRoutes(app, db, { requireAdmin });
+  orderRoutes(app, db, { requireAdmin, requireCustomer: customers.requireCustomer });
   statsRoutes(app, db, { requireAdmin });
   userRoutes(app, db, { requireAdmin });
   stockRoutes(app, db, { requireAdmin });

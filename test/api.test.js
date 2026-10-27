@@ -297,4 +297,60 @@ for (const backend of BACKENDS) describe(backend.name, () => {
     assert.ok(!(await admin('GET', '/api/orders?status=paid')).data.some((x) => x.id === o.data.order.id && x.closed_at.startsWith(day(0))));
     await admin('POST', `/api/orders/${today.data.order.id}/cancel`, {});
   });
+
+  test('clients : fiche, table habituelle, commandes et statistiques', async () => {
+    const t3 = await table('Table 3');
+    const t5 = await table('Table 5');
+    const castle = await product('Castle Beer');
+    const cash = (await admin('GET', '/api/payment-methods')).data.find((m) => m.type === 'cash');
+
+    // Un serveur peut enregistrer un client pendant le service.
+    const koffi = await waiter('POST', '/api/customers', { name: 'Koffi', phone: '+225 07 00 00 00', table_id: t3.id, notes: 'Castel bien fraîche' });
+    assert.equal(koffi.status, 201);
+    assert.equal(koffi.data.table_name, 'Table 3');
+    assert.equal(koffi.data.visits, 0);
+    assert.equal((await waiter('POST', '/api/customers', { name: '' })).status, 400);
+    assert.equal((await waiter('POST', '/api/customers', { name: 'X', table_id: 9999 })).status, 400);
+    const awa = (await waiter('POST', '/api/customers', { name: 'Awa Diallo' })).data;
+
+    // Commande pour Koffi ; les ajouts suivants sur la table restent à Koffi.
+    const o = (await waiter('POST', '/api/orders', { table_id: t3.id, product_id: castle.id, quantity: 2, customer_id: koffi.data.id })).data.order;
+    assert.equal(o.customer_name, 'Koffi');
+    const more = (await waiter('POST', '/api/orders', { table_id: t3.id, product_id: castle.id, quantity: 1 })).data.order;
+    assert.equal(more.id, o.id);
+    assert.equal(more.customer_id, koffi.data.id);
+    // Un autre client ne peut pas se greffer sur la table de Koffi.
+    const clash = await waiter('POST', '/api/orders', { table_id: t3.id, product_id: castle.id, quantity: 1, customer_id: awa.id });
+    assert.equal(clash.status, 409);
+    assert.match(clash.data.error, /Koffi/);
+
+    // Commande sans client, puis client rattaché après coup.
+    const o2 = (await waiter('POST', '/api/orders', { table_id: t5.id, product_id: castle.id, quantity: 1 })).data.order;
+    assert.equal(o2.customer_id, null);
+    const set = await waiter('PUT', `/api/orders/${o2.id}/customer`, { customer_id: awa.id });
+    assert.equal(set.data.customer_name, 'Awa Diallo');
+
+    // Fiche : commande en cours, puis visites et dépenses après encaissement.
+    assert.equal((await waiter('GET', '/api/customers')).data.find((c) => c.id === koffi.data.id).open_order_id, o.id);
+    await waiter('POST', `/api/orders/${o.id}/payments`, { method_id: cash.id });
+    await waiter('POST', `/api/orders/${o2.id}/payments`, { method_id: cash.id });
+    const fiche = (await waiter('GET', `/api/customers/${koffi.data.id}`)).data;
+    assert.equal(fiche.visits, 1);
+    assert.equal(fiche.total_spent, 3 * castle.price);
+    assert.equal(fiche.open_order_id, null);
+    assert.deepEqual(fiche.orders.map((x) => x.id), [o.id]);
+    // Commande clôturée : seul le responsable change le client.
+    assert.equal((await waiter('PUT', `/api/orders/${o.id}/customer`, { customer_id: null })).status, 409);
+
+    // Recherche, renommage (suivi sur la commande en cours), statistiques, export.
+    assert.deepEqual((await waiter('GET', '/api/customers?q=diallo')).data.map((c) => c.name), ['Awa Diallo']);
+    assert.equal((await waiter('GET', '/api/customers?q=07 00')).data[0].name, 'Koffi');
+    const top = (await admin('GET', '/api/stats')).data.top_customers;
+    assert.deepEqual(top.map((c) => [c.name, c.orders]).slice(0, 2), [['Koffi', 1], ['Awa Diallo', 1]]);
+    // Suppression (responsable) : la fiche disparaît, l'historique garde le nom.
+    assert.equal((await waiter('DELETE', `/api/customers/${koffi.data.id}`)).status, 403);
+    assert.equal((await admin('DELETE', `/api/customers/${koffi.data.id}`)).status, 200);
+    assert.equal((await admin('GET', `/api/orders/${o.id}`)).data.customer_name, 'Koffi');
+    assert.equal((await waiter('POST', '/api/orders', { table_id: t3.id, product_id: castle.id, quantity: 1, customer_id: koffi.data.id })).status, 400);
+  });
 });

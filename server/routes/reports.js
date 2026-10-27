@@ -61,9 +61,9 @@ module.exports = function reportRoutes(app, db, { requireAdmin }) {
       push(methods, m.order_id, m.method_name);
     }
     sendCsv(res, `commandes_${suffix(range)}.csv`,
-      ['Date', 'Heure', 'N° commande', 'Table', 'Statut', 'Articles', 'Total', 'Payé', 'Reste', 'Mode(s) de paiement', 'Clôturée le', 'Saisie par'],
+      ['Date', 'Heure', 'N° commande', 'Table', 'Client', 'Statut', 'Articles', 'Total', 'Payé', 'Reste', 'Mode(s) de paiement', 'Clôturée le', 'Saisie par'],
       orders.map((o) => [
-        o.created_at.slice(0, 10), o.created_at.slice(11, 16), o.number, o.table_name, STATUS_LABELS[o.status],
+        o.created_at.slice(0, 10), o.created_at.slice(11, 16), o.number, o.table_name, o.customer_name ?? '', STATUS_LABELS[o.status],
         (items.get(o.id) ?? []).join(', '),
         o.total, o.paid_amount, o.total - o.paid_amount,
         (methods.get(o.id) ?? []).join(', '), o.closed_at ?? '', o.created_by_name ?? '',

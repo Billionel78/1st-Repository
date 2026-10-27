@@ -97,6 +97,18 @@ annulation (responsable, si aucun paiement), vue des tables libres/occupées, hi
 statistiques par jour ou par période (aujourd'hui, hier, 7 jours, mois, dates libres), impression
 de l'**addition** (commande ouverte) ou du **reçu** (commande payée) au format ticket de caisse 80 mm.
 
+### Clients
+
+Écran **Clients** (tout le personnel) : fiche avec nom, téléphone, notes et **table habituelle** ; visites,
+total dépensé, panier moyen, dernière visite et historique de ses commandes ; recherche par nom ou
+téléphone. À la prise de commande, l'étape « Client » (facultative) permet de choisir un client (sa table
+habituelle est alors présélectionnée) ou d'en créer un sur place ; les ajouts sur la même table restent
+au même client, et un autre client ne peut pas se greffer sur sa table. Le client d'une commande se
+change depuis son détail (commande clôturée : responsable uniquement). Le client figure aussi sur les
+cartes de commande, les tables, l'historique, le ticket, l'export des commandes et le classement
+« Meilleurs clients » des statistiques. Supprimer une fiche (responsable) garde le nom sur les anciennes
+commandes.
+
 ### Rattrapage de ventes passées (responsable)
 
 Menu du responsable (ou page Historique) → **« Saisir des ventes passées »** : on choisit une journée

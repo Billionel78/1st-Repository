@@ -233,7 +233,7 @@ module.exports = function catalogRoutes(app, db, { requireAdmin }) {
   const tableSelect = `
     SELECT t.id, t.name, t.position,
       o.id AS order_id, o.number AS order_number, o.total AS order_total, o.paid_amount AS order_paid,
-      o.created_at AS order_created_at
+      o.created_at AS order_created_at, o.customer_id AS order_customer_id, o.customer_name AS order_customer_name
     FROM bar_tables t LEFT JOIN orders o ON o.table_id = t.id AND o.status = 'open'`;
   const getTable = (id) => db.get(`${tableSelect} WHERE t.id = ? AND t.archived = 0`, id);
 

@@ -16,7 +16,7 @@ async function computeStats(db, from, to) {
   const range = [from, to];
 
   // Requêtes indépendantes lancées ensemble (une base distante répond plus vite ainsi).
-  const [collected, byType, byMethod, created, paid, products, families, daily, byUser, open] = await Promise.all([
+  const [collected, byType, byMethod, created, paid, products, families, daily, byUser, open, customers] = await Promise.all([
     db.get(`SELECT COALESCE(SUM(amount), 0) AS amount, COUNT(*) AS count FROM payments WHERE ${inRange('created_at')}`,
       ...range),
     db.all(`
@@ -57,6 +57,10 @@ async function computeStats(db, from, to) {
     db.get(`
       SELECT COUNT(*) AS count, COALESCE(SUM(total - paid_amount), 0) AS remaining, COALESCE(SUM(total), 0) AS total
       FROM orders WHERE status = 'open'`),
+    db.all(`
+      SELECT customer_id, MAX(customer_name) AS name, COUNT(*) AS orders, SUM(total) AS amount
+      FROM orders WHERE status = 'paid' AND customer_id IS NOT NULL AND ${inRange('closed_at')}
+      GROUP BY customer_id ORDER BY amount DESC LIMIT 10`, ...range),
   ]);
   const byTypeMap = { cash: 0, mobile_money: 0, other: 0 };
   for (const r of byType) byTypeMap[r.type] = r.amount;
@@ -80,6 +84,7 @@ async function computeStats(db, from, to) {
     margin_rate: paid.amount > 0 ? Math.round(((paid.amount - cost) / paid.amount) * 1000) / 10 : null,
     items_without_cost: qtyWithoutCost,
     by_user: byUser,
+    top_customers: customers,
     products,
     top_products: products.slice(0, 10),
     families,

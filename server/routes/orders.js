@@ -7,7 +7,7 @@ const { applyStockMovement } = require('../stock');
 const MAX_QTY = 1000;
 const STATUSES = ['open', 'paid', 'cancelled'];
 
-module.exports = function orderRoutes(app, db, { requireAdmin }) {
+module.exports = function orderRoutes(app, db, { requireAdmin, requireCustomer }) {
   // ---------- Lecture ----------
   // `q` : la base, ou la transaction en cours.
   async function loadOrder(id, q = db) {
@@ -65,6 +65,7 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
     const orders = await db.all(`
       SELECT o.id, o.number, o.table_id, o.table_name, o.status, o.total, o.paid_amount,
         o.total - o.paid_amount AS remaining, o.created_at, o.updated_at, o.closed_at, o.cancel_reason,
+        o.customer_id, o.customer_name,
         u.full_name AS created_by_name
       FROM orders o LEFT JOIN users u ON u.id = o.created_by
       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
@@ -158,21 +159,32 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
   // Ajoute des articles sur une table : complète la commande ouverte de la table ou en crée une nouvelle.
   app.post('/api/orders', async (req, res) => {
     const tableId = toInt(req.body?.table_id, 'table', { min: 1 });
+    const customerId = toInt(req.body?.customer_id, 'client', { min: 1, optional: true });
     const items = parseItems(req.body);
     const { orderId, created } = await db.transaction(async (tx) => {
+      const customer = customerId ? await requireCustomer(customerId, tx) : null;
       const table = await tx.get('SELECT * FROM bar_tables WHERE id = ? AND archived = 0', tableId);
       if (!table) throw badRequest('Table introuvable.');
       const now = req.now;
-      const open = await tx.get("SELECT id, created_at FROM orders WHERE table_id = ? AND status = 'open'", tableId);
+      const open = await tx.get(
+        "SELECT id, created_at, customer_id, customer_name FROM orders WHERE table_id = ? AND status = 'open'", tableId);
       // Rattrapage : ne jamais mêler une vente passée à la commande en cours d'une autre journée.
       if (open && req.backdate && open.created_at.slice(0, 10) !== req.backdate) {
         throw conflict(`${table.name} a une commande en cours d'une autre journée : choisissez une autre table pour le rattrapage.`);
       }
+      // Une table = une commande ouverte = au plus un client.
+      if (open && customer && open.customer_id && open.customer_id !== customer.id) {
+        throw conflict(`${table.name} est occupée par la commande de ${open.customer_name} : choisissez une autre table.`);
+      }
       let id = open?.id;
       if (!id) {
-        const r = await tx.run(`INSERT INTO orders (number, table_id, table_name, status, created_by, created_at, updated_at)
-          VALUES (?, ?, ?, 'open', ?, ?, ?)`, await nextOrderNumber(tx, now), tableId, table.name, req.user.id, now, now);
+        const r = await tx.run(`INSERT INTO orders
+          (number, table_id, table_name, status, customer_id, customer_name, created_by, created_at, updated_at)
+          VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?)`, await nextOrderNumber(tx, now), tableId, table.name,
+          customer?.id ?? null, customer?.name ?? null, req.user.id, now, now);
         id = Number(r.lastInsertRowid);
+      } else if (customer && !open.customer_id) {
+        await tx.run('UPDATE orders SET customer_id = ?, customer_name = ? WHERE id = ?', customer.id, customer.name, id);
       }
       await addItems(tx, id, items, now);
       return { orderId: id, created: !open };
@@ -221,6 +233,22 @@ module.exports = function orderRoutes(app, db, { requireAdmin }) {
       if (quantity === 0) await tx.run('DELETE FROM order_items WHERE id = ?', itemId);
       else await tx.run('UPDATE order_items SET quantity = ?, updated_at = ? WHERE id = ?', quantity, now, itemId);
       await recomputeTotal(tx, id, now);
+    });
+    res.json(await loadOrder(id));
+  });
+
+  // Client d'une commande : rattacher, changer ou retirer (null). Commande clôturée : responsable seulement.
+  app.put('/api/orders/:id/customer', async (req, res) => {
+    const id = toInt(req.params.id, 'id');
+    const customerId = req.body?.customer_id === null ? null : toInt(req.body?.customer_id, 'client', { min: 1 });
+    await db.transaction(async (tx) => {
+      const order = await requireOrder(id, tx);
+      if (order.status !== 'open' && req.user.role !== 'admin') {
+        throw conflict('Seul le responsable peut changer le client d’une commande clôturée.');
+      }
+      const customer = customerId ? await requireCustomer(customerId, tx) : null;
+      await tx.run('UPDATE orders SET customer_id = ?, customer_name = ?, updated_at = ? WHERE id = ?',
+        customer?.id ?? null, customer?.name ?? null, req.now, id);
     });
     res.json(await loadOrder(id));
   });
