@@ -125,38 +125,168 @@ function confirmModal(title, message, { confirmLabel = 'Confirmer', danger = fal
  * Formulaire générique dans une modale.
  * fields: [{ name, label, type: text|number|password|select|checkbox|color, value, options, required, min, hint }]
  */
+/* ---------- Photos des produits : lecture, cadrage automatique, éditeur de cadrage ---------- */
+const PHOTO_SIZE = 600; // photo enregistrée : carré de 600 × 600 px, comme le cadre des cartes produit
+const PHOTO_MARGIN = 0.07; // marge autour du produit en mode « Ajuster »
+
 /**
- * Réduit une photo (600 px maximum) et la convertit en « data URL » WebP, ou JPEG si le navigateur
- * ne sait pas produire de WebP : une photo de téléphone passe de plusieurs Mo à quelques dizaines de Ko.
+ * Lit une photo, fichier choisi ou photo déjà enregistrée (adresse du site), et la réduit à 1600 px.
+ * Un fichier est lu en « data URL », autorisée par la politique de sécurité des pages.
  */
-async function resizeImage(file, max = 600) {
-  if (!/^image\//.test(file.type)) throw new Error('Choisissez un fichier image (JPEG, PNG, WebP…).');
-  // Lecture en « data URL » : autorisée par la politique de sécurité des pages (contrairement à blob:).
-  const source = await new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = () => reject(new Error('Impossible de lire cette image.'));
-    reader.readAsDataURL(file);
-  });
+async function loadPhoto(fileOrUrl) {
+  let source = fileOrUrl;
+  if (typeof fileOrUrl !== 'string') {
+    if (!/^image\//.test(fileOrUrl.type)) throw new Error('Choisissez un fichier image (JPEG, PNG, WebP…).');
+    source = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('Impossible de lire cette image.'));
+      reader.readAsDataURL(fileOrUrl);
+    });
+  }
   const img = await new Promise((resolve, reject) => {
     const el = new Image();
     el.onload = () => resolve(el);
     el.onerror = () => reject(new Error('Impossible de lire cette image.'));
     el.src = source;
   });
-  const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+  const scale = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
   const canvas = document.createElement('canvas');
   canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
   canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+/**
+ * Zone utile de la photo : on retire les bords unis (fond blanc, fond uni ou transparent) pour que
+ * le produit remplisse le cadre. Une photo prise dans un décor garde son cadrage d'origine.
+ */
+function detectContent(photo) {
+  const scale = Math.min(1, 300 / Math.max(photo.width, photo.height));
+  const w = Math.max(1, Math.round(photo.width * scale));
+  const h = Math.max(1, Math.round(photo.height * scale));
+  const c = document.createElement('canvas');
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(photo, 0, 0, w, h);
+  const { data } = ctx.getImageData(0, 0, w, h);
+  const px = (x, y) => data.subarray((y * w + x) * 4, (y * w + x) * 4 + 4);
+  // Couleur du fond : moyenne des quatre coins.
+  const corners = [px(0, 0), px(w - 1, 0), px(0, h - 1), px(w - 1, h - 1)];
+  const bg = [0, 1, 2, 3].map((i) => corners.reduce((sum, c4) => sum + c4[i], 0) / 4);
+  const isBackground = (p) => (bg[3] < 40 ? p[3] < 40
+    : Math.abs(p[0] - bg[0]) + Math.abs(p[1] - bg[1]) + Math.abs(p[2] - bg[2]) < 60 || p[3] < 40);
+  let minX = w; let minY = h; let maxX = -1; let maxY = -1;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (isBackground(px(x, y))) continue;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  const full = { x: 0, y: 0, w: photo.width, h: photo.height };
+  if (maxX < 0) return full; // image vide ou entièrement unie
+  const box = { x: minX / scale, y: minY / scale, w: (maxX - minX + 1) / scale, h: (maxY - minY + 1) / scale };
+  // Presque toute l'image (photo dans un décor) : pas de recadrage.
+  return box.w * box.h > photo.width * photo.height * 0.92 ? full : box;
+}
+
+/**
+ * Éditeur de cadrage dans un cadre carré : « Ajuster » (produit entier, centré), « Remplir le cadre »,
+ * zoom et déplacement à la souris ou au doigt. Ce qui est affiché est exactement ce qui est enregistré.
+ */
+function createPhotoEditor(container, photo) {
+  const content = detectContent(photo);
+  container.innerHTML = `
+    <div class="photo-editor">
+      <div class="photo-editor-frame">
+        <canvas class="photo-editor-canvas" width="${PHOTO_SIZE}" height="${PHOTO_SIZE}"
+          aria-label="Cadrage de la photo : faites glisser pour déplacer"></canvas>
+      </div>
+      <div class="photo-editor-tools">
+        <div class="seg" role="group" aria-label="Disposition">
+          <button type="button" data-fit="contain" class="active">Ajuster</button>
+          <button type="button" data-fit="cover">Remplir le cadre</button>
+        </div>
+        <label class="photo-zoom">Zoom
+          <input type="range" min="50" max="300" step="1" value="100" aria-label="Zoom">
+        </label>
+        <span class="muted small">Faites glisser la photo pour la centrer.</span>
+      </div>
+    </div>`;
+  const canvas = $('canvas', container);
   const ctx = canvas.getContext('2d');
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-  const webp = canvas.toDataURL('image/webp', 0.85);
-  if (webp.startsWith('data:image/webp')) return webp;
-  // JPEG sans transparence : fond blanc.
-  ctx.globalCompositeOperation = 'destination-over';
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  return canvas.toDataURL('image/jpeg', 0.85);
+  const zoom = $('input[type=range]', container);
+  const view = { mode: 'contain', base: 1, zoom: 1, x: 0, y: 0 };
+
+  function frame(mode) {
+    view.mode = mode;
+    view.zoom = 1;
+    zoom.value = 100;
+    if (mode === 'contain') {
+      // La zone utile tient dans le cadre, avec une petite marge, centrée.
+      view.base = (PHOTO_SIZE * (1 - 2 * PHOTO_MARGIN)) / Math.max(content.w, content.h);
+      view.x = PHOTO_SIZE / 2 - (content.x + content.w / 2) * view.base;
+      view.y = PHOTO_SIZE / 2 - (content.y + content.h / 2) * view.base;
+    } else {
+      // La photo entière couvre le cadre, centrée.
+      view.base = PHOTO_SIZE / Math.min(photo.width, photo.height);
+      view.x = (PHOTO_SIZE - photo.width * view.base) / 2;
+      view.y = (PHOTO_SIZE - photo.height * view.base) / 2;
+    }
+    $$('[data-fit]', container).forEach((b) => b.classList.toggle('active', b.dataset.fit === mode));
+    draw();
+  }
+
+  function draw() {
+    const s = view.base * view.zoom;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, PHOTO_SIZE, PHOTO_SIZE);
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(photo, view.x, view.y, photo.width * s, photo.height * s);
+  }
+
+  // Zoom autour du centre du cadre.
+  zoom.addEventListener('input', () => {
+    const before = view.base * view.zoom;
+    view.zoom = Number(zoom.value) / 100;
+    const after = view.base * view.zoom;
+    const c = PHOTO_SIZE / 2;
+    view.x = c - ((c - view.x) * after) / before;
+    view.y = c - ((c - view.y) * after) / before;
+    draw();
+  });
+  $$('[data-fit]', container).forEach((b) => b.addEventListener('click', () => frame(b.dataset.fit)));
+
+  // Déplacement (souris, doigt, stylet).
+  let drag = null;
+  canvas.addEventListener('pointerdown', (e) => {
+    drag = { x: e.clientX, y: e.clientY, ox: view.x, oy: view.y };
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const ratio = PHOTO_SIZE / canvas.getBoundingClientRect().width;
+    view.x = drag.ox + (e.clientX - drag.x) * ratio;
+    view.y = drag.oy + (e.clientY - drag.y) * ratio;
+    draw();
+  });
+  const stop = () => { drag = null; };
+  canvas.addEventListener('pointerup', stop);
+  canvas.addEventListener('pointercancel', stop);
+
+  frame('contain');
+  return {
+    /** Photo cadrée : WebP (ou JPEG si le navigateur ne sait pas produire de WebP). */
+    export() {
+      const webp = canvas.toDataURL('image/webp', 0.85);
+      return webp.startsWith('data:image/webp') ? webp : canvas.toDataURL('image/jpeg', 0.85);
+    },
+  };
 }
 
 function formModal({ title, fields, submitLabel = 'Enregistrer', onSubmit }) {
@@ -167,9 +297,11 @@ function formModal({ title, fields, submitLabel = 'Enregistrer', onSubmit }) {
         <span class="field-label">${esc(f.label)}</span>
         <div class="image-field-row">
           <div class="image-preview" aria-live="polite">${f.value ? `<img src="${esc(f.value)}" alt="">` : '<span aria-hidden="true">📷</span>'}</div>
+          <div class="image-editor-slot" hidden></div>
           <div class="image-actions">
             <label class="btn btn-sm" for="${id}">${f.value ? 'Changer la photo' : 'Choisir une photo'}</label>
             <input type="file" id="${id}" accept="image/*" hidden>
+            <button type="button" class="btn btn-sm" data-image-reframe ${f.value ? '' : 'hidden'}>Recadrer</button>
             <button type="button" class="btn btn-sm btn-ghost" data-image-clear ${f.value ? '' : 'hidden'}>Retirer la photo</button>
             ${f.hint ? `<span class="muted small">${esc(f.hint)}</span>` : ''}
           </div>
@@ -198,16 +330,36 @@ function formModal({ title, fields, submitLabel = 'Enregistrer', onSubmit }) {
            <button class="btn btn-primary" type="submit" form="modal-form">${esc(submitLabel)}</button>`,
   });
   const form = $('#modal-form', modal);
-  // Champs photo : { url } = photo actuelle (ou null), { pending } = nouvelle photo à envoyer.
+  // Champs photo : { url } = photo actuelle (ou null) ; { editor } = nouvelle photo en cours de cadrage.
   const images = {};
   for (const f of fields.filter((x) => x.type === 'image')) {
     const box = $(`[data-image-field="${f.name}"]`, form);
-    const photo = { url: f.value || null, pending: null };
+    const photo = { url: f.value || null, editor: null };
     images[f.name] = photo;
     const preview = $('.image-preview', box);
+    const editorBox = $('.image-editor-slot', box);
     const clear = $('[data-image-clear]', box);
+    const reframe = $('[data-image-reframe]', box);
     const label = $('label.btn', box);
+    const edit = async (source) => {
+      try {
+        const picture = await loadPhoto(source);
+        preview.hidden = true;
+        editorBox.hidden = false;
+        photo.editor = createPhotoEditor(editorBox, picture);
+        clear.hidden = false;
+        reframe.hidden = true;
+        $('#modal-error', modal).textContent = '';
+      } catch (err) {
+        $('#modal-error', modal).textContent = err.message;
+      }
+    };
     const show = (src) => {
+      photo.editor = null;
+      reframe.hidden = !src;
+      editorBox.innerHTML = '';
+      editorBox.hidden = true;
+      preview.hidden = false;
       preview.innerHTML = src ? `<img src="${esc(src)}" alt="">` : '<span aria-hidden="true">📷</span>';
       clear.hidden = !src;
       label.textContent = src ? 'Changer la photo' : 'Choisir une photo';
@@ -216,17 +368,12 @@ function formModal({ title, fields, submitLabel = 'Enregistrer', onSubmit }) {
       const file = e.target.files[0];
       e.target.value = '';
       if (!file) return;
-      try {
-        photo.pending = await resizeImage(file);
-        show(photo.pending);
-        $('#modal-error', modal).textContent = '';
-      } catch (err) {
-        $('#modal-error', modal).textContent = err.message;
-      }
+      label.textContent = 'Choisir une autre photo';
+      await edit(file);
     });
+    reframe.addEventListener('click', () => edit(photo.url));
     clear.addEventListener('click', () => {
       photo.url = null;
-      photo.pending = null;
       show(null);
     });
   }
@@ -235,7 +382,8 @@ function formModal({ title, fields, submitLabel = 'Enregistrer', onSubmit }) {
     const values = {};
     for (const f of fields) {
       if (f.type === 'image') {
-        values[f.name] = { ...images[f.name] };
+        const photo = images[f.name];
+        values[f.name] = { url: photo.url, pending: photo.editor ? photo.editor.export() : null };
         continue;
       }
       const input = form.elements[f.name];
@@ -1428,7 +1576,7 @@ async function adminProducts(body, seq) {
   const form = (p, model = p) => withStockTracking(formModal({
     title: p ? `Modifier « ${p.name} »` : model ? `Dupliquer « ${model.name} »` : 'Nouveau produit',
     fields: [
-      { name: 'image', label: 'Photo', type: 'image', value: model?.image_url, hint: 'Photo du produit sur fond clair, de préférence. Elle est réduite automatiquement.' },
+      { name: 'image', label: 'Photo', type: 'image', value: model?.image_url, hint: 'Le produit est recadré et centré automatiquement dans le cadre ; ajustez si besoin. Un fond clair donne le meilleur rendu.' },
       { name: 'name', label: 'Nom du produit', required: true, value: p ? p.name : model ? `${model.name} (copie)` : '', maxlength: 80 },
       { name: 'format', label: 'Format / contenance (facultatif)', value: model?.format, placeholder: 'Ex. : 65 cl', maxlength: 30 },
       { name: 'family_id', label: 'Famille', type: 'select', options: familyOptions, value: model?.family_id ?? (productFilter.family || families[0]?.id) },

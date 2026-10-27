@@ -278,7 +278,7 @@ label.check input { width: 22px; min-height: 22px; height: 22px; }
   position: relative; display: grid; place-items: center; aspect-ratio: 1 / 1; width: 100%; max-width: 100%;
   margin-bottom: .35rem; border-radius: 12px; background: var(--photo-bg); overflow: hidden;
 }
-.product-photo img { width: 100%; height: 100%; object-fit: contain; padding: 10%; }
+.product-photo img { width: 100%; height: 100%; object-fit: contain; } /* photos cadrées en carré : marge incluse */
 /* Le fond blanc des photos se fond dans le cadre gris clair. */
 .product-photo img, .thumb img, .image-preview img { mix-blend-mode: multiply; }
 .product-photo-icon { font-size: 2.6rem; opacity: .55; }
@@ -297,14 +297,29 @@ label.check input { width: 22px; min-height: 22px; height: 22px; }
   width: 110px; height: 110px; flex: none; display: grid; place-items: center; border-radius: 12px;
   background: var(--photo-bg); border: 1px dashed var(--border); overflow: hidden; font-size: 2rem;
 }
-.image-preview img { width: 100%; height: 100%; object-fit: contain; padding: 8px; }
+.image-preview img { width: 100%; height: 100%; object-fit: contain; }
+/* Éditeur de cadrage : même cadre carré et même rendu que les cartes produit. */
+.image-editor-slot { min-width: 0; flex-basis: 100%; order: 2; }
+.photo-editor { display: flex; gap: 1rem; align-items: flex-start; flex-wrap: wrap; }
+.photo-editor-frame {
+  width: min(220px, 100%); aspect-ratio: 1 / 1; border-radius: 12px; overflow: hidden; flex: none;
+  background: var(--photo-bg); border: 1px solid var(--border); isolation: isolate;
+}
+.photo-editor-canvas {
+  display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; mix-blend-mode: multiply;
+}
+.photo-editor-canvas:active { cursor: grabbing; }
+.photo-editor-tools { display: grid; gap: .6rem; min-width: 0; flex: 1 1 180px; }
+.photo-editor-tools .seg button { min-height: 38px; padding: .4rem .7rem; }
+.photo-zoom { display: grid; gap: .2rem; }
+.photo-zoom input { min-height: 28px; padding: 0; border: 0; background: none; }
 .image-actions { display: grid; gap: .4rem; justify-items: start; min-width: 0; flex: 1; }
 .product-cell { display: flex; align-items: center; gap: .7rem; }
 .thumb {
   width: 44px; height: 44px; flex: none; display: grid; place-items: center; border-radius: 8px;
   background: var(--photo-bg); overflow: hidden; font-size: 1.2rem;
 }
-.thumb img { width: 100%; height: 100%; object-fit: contain; padding: 3px; }
+.thumb img { width: 100%; height: 100%; object-fit: contain; }
 .thumb .product-photo-icon { font-size: 1.2rem; }
 .tile-product.disabled { opacity: .45; cursor: not-allowed; }
 .tile-stock { position: absolute; top: .6rem; right: .6rem; }
