@@ -1,9 +1,11 @@
 'use strict';
 
-// Construit demo/dist/ice-manager-demo.html : une page autonome qui contient l'interface (public/),
-// le code serveur (server/) et SQLite en WebAssembly. Elle fonctionne sans serveur, données dans le navigateur.
+// Construit deux pages autonomes qui contiennent l'interface (public/), le code serveur (server/)
+// et SQLite en WebAssembly, et fonctionnent sans serveur :
+//   demo/dist/ice-manager.html       la plateforme : données partagées entre appareils (stockage de l'artefact)
+//   demo/dist/ice-manager-demo.html  la démo : données d'exemple, conservées dans le navigateur
 //
-//   npm run build:demo
+//   npm run build:web
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -16,7 +18,7 @@ const MODULES = [
   'server/app.js', 'server/db.js', 'server/http.js', 'server/time.js', 'server/stock.js',
   'server/routes/catalog.js', 'server/routes/orders.js', 'server/routes/stats.js', 'server/routes/users.js',
   'server/routes/stock.js', 'server/routes/reports.js',
-  'demo/main.js', 'demo/seed-demo.js',
+  'demo/main.js', 'demo/seed-demo.js', 'demo/shared-store.js',
   'demo/shims/express.js', 'demo/shims/sqlite.js', 'demo/shims/security.js',
 ];
 const ALIASES = {
@@ -63,7 +65,7 @@ function bundle() {
 
 const inlineScript = (code) => `<script>\n${code.replace(/<\/script/gi, '<\\/script')}\n</script>`;
 
-function build() {
+function build(mode, title, filename) {
   const index = read('public/index.html');
   const body = index
     .slice(index.indexOf('<body>') + '<body>'.length, index.indexOf('</body>'))
@@ -72,20 +74,21 @@ function build() {
   const wasm = fs.readFileSync(require.resolve('sql.js/dist/sql-wasm.wasm')).toString('base64');
 
   const html = [
-    '<title>ICE MANAGER</title>',
+    `<title>${title}</title>`,
     `<style>\n${read('public/style.css')}\n${read('demo/demo.css')}\n</style>`,
     body.trim(),
     inlineScript(sqlJs),
-    inlineScript(`window.__SQL_WASM_B64 = "${wasm}";`),
+    inlineScript(`window.__SQL_WASM_B64 = "${wasm}";\nwindow.__ICE_MODE = ${JSON.stringify(mode)};`),
     inlineScript(bundle()),
     inlineScript(read('public/app.js')),
-    inlineScript(read('demo/demo-ui.js')),
+    inlineScript(read('demo/platform-ui.js')),
   ].join('\n');
 
-  const out = path.join(__dirname, 'dist', 'ice-manager-demo.html');
+  const out = path.join(__dirname, 'dist', filename);
   fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, html);
-  console.log(`Démo générée : ${path.relative(ROOT, out)} (${(html.length / 1024).toFixed(0)} Ko)`);
+  console.log(`Page générée : ${path.relative(ROOT, out)} (${(html.length / 1024).toFixed(0)} Ko)`);
 }
 
-build();
+build('shared', 'ICE MANAGER', 'ice-manager.html');
+build('demo', 'ICE MANAGER Démo', 'ice-manager-demo.html');

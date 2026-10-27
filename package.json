@@ -11,7 +11,7 @@
     "start": "node --disable-warning=ExperimentalWarning server/index.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
     "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.js\"",
-    "build:demo": "node demo/build.js"
+    "build:web": "node demo/build.js"
   },
   "license": "UNLICENSED",
   "dependencies": {

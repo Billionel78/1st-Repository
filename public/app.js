@@ -1528,6 +1528,8 @@ async function adminSettings(body) {
       toast('Paramètres enregistrés.', 'ok');
     } catch (err) { $('#settings-error', body).textContent = err.message; }
   });
+  // Point d'extension : la version navigateur y ajoute la sauvegarde / restauration.
+  window.iceHooks?.settingsExtras?.(body);
 }
 
 /* ---------- Démarrage ---------- */

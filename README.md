@@ -120,13 +120,23 @@ commandes et paiements enregistrés.
 Sécurité : mots de passe hachés (scrypt), session par cookie `HttpOnly` / `SameSite=Strict`,
 limitation des tentatives de connexion, contrôle des rôles côté serveur, en-têtes de sécurité (CSP).
 
-## Démo sans serveur
+## Version navigateur (sans serveur)
 
-`npm run build:demo` génère `demo/dist/ice-manager-demo.html`, une page autonome qui embarque
-l'interface, le code serveur (exécuté dans le navigateur) et SQLite en WebAssembly (sql.js).
-Elle contient une semaine de ventes d'exemple ; les données restent dans le navigateur du visiteur.
-Comptes : `admin` / `admin123` (responsable) et `awa` / `serveur1` (serveur).
-Dans cette démo, l'impression affiche un aperçu du ticket et les exports s'affichent pour être copiés.
+`npm run build:web` génère deux pages autonomes dans `demo/dist/`, qui embarquent l'interface,
+le code serveur (exécuté dans le navigateur, Express et `node:sqlite` remplacés par des équivalents
+légers) et SQLite en WebAssembly (sql.js) :
+
+- **`ice-manager.html` — la plateforme**, publiée comme artefact claude.ai. La base est stockée dans le
+  stockage partagé de l'artefact (capacité `db`) : compressée, découpée en documents et versionnée.
+  Chaque modification prend un bail d'écriture, vérifie qu'elle part de la dernière version, applique
+  l'action avec le code serveur, puis publie la version suivante ; les autres appareils la reçoivent
+  en direct. À la première ouverture, un écran de configuration crée l'établissement et le compte du
+  responsable. Sauvegarde / restauration dans Gestion → Paramètres. Accès : le propriétaire de
+  l'artefact et les personnes invitées comme éditeurs (ou contributeurs dans une organisation).
+- **`ice-manager-demo.html` — la démo** : une semaine de ventes d'exemple, données gardées dans le
+  navigateur. Comptes `admin` / `admin123` et `awa` / `serveur1`.
+
+Dans ces versions, l'impression affiche le ticket à l'écran (le lecteur claude.ai bloque l'impression).
 
 ## Tests
 

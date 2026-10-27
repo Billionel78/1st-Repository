@@ -1,62 +1,49 @@
 'use strict';
 
-// Démarrage de la démo : le code serveur (server/*.js) s'exécute dans le navigateur.
-// Les appels fetch('/api/…') de l'interface sont transmis directement à l'application Express
-// (version simplifiée), et la base SQLite est sauvegardée dans le stockage local du navigateur.
+// Démarrage de l'application dans le navigateur : le code serveur (server/*.js) s'exécute ici.
+// Les appels fetch('/api/…') de l'interface sont transmis à l'application Express (version simplifiée).
+//
+// Deux modes, choisis à la construction (window.__ICE_MODE) :
+//  - « demo »   : données d'exemple, conservées dans le navigateur du visiteur ;
+//  - « shared » : la plateforme réelle, base partagée entre tous les appareils via le stockage
+//                 de l'artefact (capacité `db`), synchronisée en direct.
 
 const { openDatabase, seed } = require('../server/db');
 const { createApp } = require('../server/app');
 const { seedDemo } = require('./seed-demo');
+const { createSharedStore, SyncError, gzip, gunzip, toBase64, fromBase64 } = require('./shared-store');
 
-const DB_KEY = 'ice-manager-demo-db-v1';
-const COOKIE_KEY = 'ice-manager-demo-session-v1';
+const MODE = globalThis.__ICE_MODE === 'shared' ? 'shared' : 'demo';
+const KEYS = MODE === 'shared'
+  ? { session: 'ice-manager-session-v1' }
+  : { db: 'ice-manager-demo-db-v1', session: 'ice-manager-demo-session-v1' };
 
 const storage = {
   get(key) { try { return localStorage.getItem(key); } catch { return null; } },
-  set(key, value) { try { localStorage.setItem(key, value); } catch { /* stockage indisponible : démo non persistante */ } },
+  set(key, value) { try { localStorage.setItem(key, value); } catch { /* stockage indisponible */ } },
   remove(key) { try { localStorage.removeItem(key); } catch { /* idem */ } },
 };
 
-function toBase64(bytes) {
-  let s = '';
-  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
-  return btoa(s);
-}
-function fromBase64(b64) {
-  const s = atob(b64);
-  const bytes = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
-  return bytes;
-}
+const json = (status, data) => new Response(JSON.stringify(data), {
+  status, headers: { 'Content-Type': 'application/json; charset=utf-8' },
+});
 
-function freshDatabase() {
-  globalThis.__ICE_DB_BYTES = undefined;
+// ---------- Base courante ----------
+const current = { db: null, app: null, version: 0 };
+
+function mount(bytes, version = 0) {
+  globalThis.__ICE_DB_BYTES = bytes || undefined;
   const db = openDatabase(':memory:');
-  seed(db, { adminPassword: 'admin123' });
-  seedDemo(db);
+  globalThis.__ICE_DB_BYTES = undefined;
+  if (current.db) current.db.close();
+  Object.assign(current, { db, app: createApp(db), version });
   return db;
 }
 
-const ready = (async () => {
-  globalThis.__SQL = await globalThis.initSqlJs({ wasmBinary: fromBase64(globalThis.__SQL_WASM_B64) });
-  let db;
-  const saved = storage.get(DB_KEY);
-  if (saved) {
-    try {
-      globalThis.__ICE_DB_BYTES = fromBase64(saved);
-      db = openDatabase(':memory:');
-    } catch {
-      db = null;
-    }
-  }
-  if (!db) db = freshDatabase();
-  const app = createApp(db);
-  const persist = () => storage.set(DB_KEY, toBase64(db.export()));
-  persist();
-  return { app, persist };
-})();
+const totalChanges = () => current.db.prepare('SELECT total_changes() AS n').get().n;
 
-let cookie = storage.get(COOKIE_KEY) || '';
+// ---------- Requêtes ----------
+let cookie = storage.get(KEYS.session) || '';
 
 function makeResponse() {
   return {
@@ -77,42 +64,273 @@ function makeResponse() {
     send(body) { this.body = body; this.finished = true; return this; },
     cookie(name, value) {
       cookie = `${name}=${encodeURIComponent(value)}`;
-      storage.set(COOKIE_KEY, cookie);
+      storage.set(KEYS.session, cookie);
       return this;
     },
     clearCookie() {
       cookie = '';
-      storage.remove(COOKIE_KEY);
+      storage.remove(KEYS.session);
       return this;
     },
   };
 }
 
-/** Exécute une requête sur l'application Express de la démo. */
-async function handle(url, init = {}) {
-  const { app, persist } = await ready;
-  const u = new URL(url, 'https://demo.local');
-  const method = (init.method || 'GET').toUpperCase();
+/** Exécute une requête sur l'application locale (synchrone). */
+function run(method, url, body) {
+  const u = new URL(url, 'https://ice.local');
   const res = makeResponse();
-  let body;
-  try {
-    body = init.body ? JSON.parse(init.body) : undefined;
-  } catch {
-    return new Response(JSON.stringify({ error: 'Requête JSON invalide.' }), { status: 400 });
-  }
   const req = {
     method, url, path: u.pathname, query: Object.fromEntries(u.searchParams), params: {}, body,
     headers: { cookie }, ip: '127.0.0.1',
   };
   try {
-    app.handle(req, res);
+    current.app.handle(req, res);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Erreur interne de la démo.' });
+    res.status(500).json({ error: 'Erreur interne.' });
   }
   if (!res.finished) res.status(404).json({ error: 'Ressource introuvable.' });
-  if (method !== 'GET' && res.statusCode < 500) persist();
-  return new Response(res.body, { status: res.statusCode, headers: res.headers });
+  return res;
+}
+
+const toResponse = (res) => new Response(res.body, { status: res.statusCode, headers: res.headers });
+
+function currentUser() {
+  const res = run('GET', '/api/auth/me');
+  return res.statusCode === 200 ? JSON.parse(res.body).user : null;
+}
+
+/** Vérifie qu'une sauvegarde est une base ICE MANAGER lisible. */
+function checkDatabase(bytes) {
+  const SQL = globalThis.__SQL;
+  const probe = new SQL.Database(bytes);
+  try {
+    const n = probe.exec('SELECT COUNT(*) FROM users')[0].values[0][0];
+    if (!n) throw new Error('vide');
+  } finally {
+    probe.close();
+  }
+}
+
+// ---------- Mode démo ----------
+async function bootDemo() {
+  const saved = storage.get(KEYS.db);
+  if (saved) {
+    try { mount(fromBase64(saved)); } catch { current.db = null; }
+  }
+  if (!current.db) {
+    mount();
+    seed(current.db, { adminPassword: 'admin123' });
+    seedDemo(current.db);
+  }
+  persistDemo();
+  return 'ready';
+}
+const persistDemo = () => storage.set(KEYS.db, toBase64(current.db.export()));
+
+// ---------- Mode partagé ----------
+let shared = null;
+let status = 'loading'; // loading | unavailable | setup | ready
+let reloading = null;
+
+async function bootShared() {
+  const store = globalThis.claude?.use ? await globalThis.claude.use('db') : null;
+  if (!store) return 'unavailable';
+  shared = createSharedStore(store);
+  const snap = await shared.load();
+  if (!snap) return 'setup';
+  mount(snap.bytes, snap.version);
+  watchRemote();
+  return 'ready';
+}
+
+function watchRemote() {
+  shared.watch((version) => {
+    if (version > current.version) refreshFromStore();
+  }, () => {});
+}
+
+/** Recharge la dernière version publiée (modification faite sur un autre appareil). */
+function refreshFromStore() {
+  reloading ??= (async () => {
+    try {
+      const snap = await shared.load();
+      if (snap && snap.version > current.version) {
+        mount(snap.bytes, snap.version);
+        globalThis.dispatchEvent(new CustomEvent('ice:remote-change'));
+      }
+    } finally {
+      reloading = null;
+    }
+  })();
+  return reloading;
+}
+
+// Une seule écriture à la fois dans cet onglet.
+let writeQueue = Promise.resolve();
+function serialized(fn) {
+  const next = writeQueue.then(fn, fn);
+  writeQueue = next.catch(() => {});
+  return next;
+}
+
+/** Applique une modification et la publie pour tous les appareils. */
+function sharedWrite(method, url, body) {
+  return serialized(async () => {
+    await shared.acquire();
+    try {
+      const head = await shared.readHead();
+      if ((head?.version ?? 0) !== current.version) {
+        const snap = await shared.load();
+        mount(snap.bytes, snap.version);
+        globalThis.dispatchEvent(new CustomEvent('ice:remote-change'));
+      }
+      const before = totalChanges();
+      const res = run(method, url, body);
+      if (totalChanges() !== before) {
+        try {
+          current.version = await shared.publish(current.version, current.db.export());
+        } catch (err) {
+          // La modification n'a pas pu être partagée : on revient à la version publiée.
+          const snap = await shared.load().catch(() => null);
+          if (snap) mount(snap.bytes, snap.version);
+          globalThis.dispatchEvent(new CustomEvent('ice:remote-change'));
+          const message = err instanceof SyncError ? err.message
+            : err?.code === 'quota_exceeded' ? 'Espace de stockage plein : faites une sauvegarde puis contactez votre administrateur.'
+              : 'Enregistrement impossible (connexion ?). Vérifiez le réseau et réessayez.';
+          return json(503, { error: message });
+        }
+      }
+      return toResponse(res);
+    } finally {
+      shared.release();
+    }
+  });
+}
+
+/** Configuration initiale : crée la base et le compte du responsable. */
+function setup(body) {
+  return serialized(async () => {
+    const barName = String(body?.bar_name ?? '').trim();
+    const fullName = String(body?.full_name ?? '').trim();
+    const username = String(body?.username ?? '').trim();
+    const password = String(body?.password ?? '');
+    if (!barName || barName.length > 60) return json(400, { error: 'Indiquez le nom de l’établissement (60 caractères maximum).' });
+    if (!fullName || fullName.length > 80) return json(400, { error: 'Indiquez votre nom (80 caractères maximum).' });
+    if (!/^[\w.-]{2,50}$/.test(username)) {
+      return json(400, { error: "L'identifiant doit contenir 2 à 50 lettres, chiffres, « . », « - » ou « _ »." });
+    }
+    if (password.length < 6) return json(400, { error: 'Le mot de passe doit contenir au moins 6 caractères.' });
+
+    await shared.acquire();
+    try {
+      const existing = await shared.load();
+      if (existing) {
+        mount(existing.bytes, existing.version);
+        status = 'ready';
+        watchRemote();
+        return json(409, { error: 'La plateforme a déjà été configurée depuis un autre appareil. Connectez-vous.' });
+      }
+      mount();
+      seed(current.db, { adminPassword: password, demoCatalog: true });
+      current.db.prepare("UPDATE users SET username = ?, full_name = ? WHERE username = 'admin'").run(username, fullName);
+      current.db.prepare("UPDATE settings SET value = ? WHERE key = 'bar_name'").run(barName);
+      current.version = await shared.publish(0, current.db.export());
+      status = 'ready';
+      watchRemote();
+      return json(201, { ok: true });
+    } finally {
+      shared.release();
+    }
+  });
+}
+
+// ---------- Sauvegarde / restauration (responsable) ----------
+async function backup() {
+  const user = currentUser();
+  if (user?.role !== 'admin') return json(403, { error: 'Action réservée au responsable.' });
+  const settings = JSON.parse(run('GET', '/api/settings').body);
+  return json(200, {
+    app: 'ICE MANAGER',
+    format: 1,
+    bar_name: settings.bar_name,
+    created_at: new Date().toISOString(),
+    data: toBase64(await gzip(current.db.export())),
+  });
+}
+
+async function restore(body) {
+  const user = currentUser();
+  if (user?.role !== 'admin') return json(403, { error: 'Action réservée au responsable.' });
+  let bytes;
+  try {
+    if (body?.app !== 'ICE MANAGER' || body?.format !== 1) throw new Error('format');
+    bytes = await gunzip(fromBase64(body.data));
+    checkDatabase(bytes);
+  } catch {
+    return json(400, { error: 'Ce fichier n’est pas une sauvegarde ICE MANAGER valide.' });
+  }
+  if (MODE === 'demo') {
+    mount(bytes);
+    persistDemo();
+    return json(200, { ok: true });
+  }
+  return serialized(async () => {
+    await shared.acquire();
+    try {
+      const head = await shared.readHead();
+      const version = await shared.publish(head?.version ?? 0, bytes);
+      mount(bytes, version);
+      return json(200, { ok: true });
+    } catch (err) {
+      return json(503, { error: err instanceof SyncError ? err.message : 'Restauration impossible. Réessayez.' });
+    } finally {
+      shared.release();
+    }
+  });
+}
+
+// ---------- Point d'entrée ----------
+const ready = (async () => {
+  globalThis.__SQL = await globalThis.initSqlJs({ wasmBinary: fromBase64(globalThis.__SQL_WASM_B64) });
+  try {
+    status = MODE === 'shared' ? await bootShared() : await bootDemo();
+  } catch (err) {
+    console.error(err);
+    status = 'unavailable';
+  }
+})();
+
+const UNAVAILABLE = {
+  error: 'Les données partagées sont inaccessibles. Ouvrez ce lien sur claude.ai, connecté avec un compte autorisé.',
+};
+
+async function handle(url, init = {}) {
+  await ready;
+  const method = (init.method || 'GET').toUpperCase();
+  let body;
+  try {
+    body = init.body ? JSON.parse(init.body) : undefined;
+  } catch {
+    return json(400, { error: 'Requête JSON invalide.' });
+  }
+  const path = new URL(url, 'https://ice.local').pathname;
+
+  if (path === '/api/platform') return json(200, { mode: MODE, status });
+  if (MODE === 'shared') {
+    if (path === '/api/platform/setup' && method === 'POST') {
+      return status === 'setup' ? setup(body) : json(409, { error: 'La plateforme est déjà configurée.' });
+    }
+    if (status !== 'ready') return json(503, UNAVAILABLE);
+    if (reloading) await reloading;
+  }
+  if (path === '/api/platform/backup' && method === 'GET') return backup();
+  if (path === '/api/platform/restore' && method === 'POST') return restore(body);
+
+  if (MODE === 'shared' && method !== 'GET') return sharedWrite(method, url, body);
+  const res = run(method, url, body);
+  if (MODE === 'demo' && method !== 'GET') persistDemo();
+  return toResponse(res);
 }
 
 const nativeFetch = globalThis.fetch.bind(globalThis);
@@ -122,10 +340,12 @@ globalThis.fetch = (input, init) => {
 };
 
 globalThis.__iceDemo = {
+  mode: MODE,
   handle,
   reset() {
-    storage.remove(DB_KEY);
-    storage.remove(COOKIE_KEY);
+    if (MODE !== 'demo') return;
+    storage.remove(KEYS.db);
+    storage.remove(KEYS.session);
     location.reload();
   },
 };
