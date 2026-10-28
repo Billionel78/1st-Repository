@@ -122,4 +122,15 @@ for (const backend of BACKENDS) describe(backend.name, () => {
     for (let i = 0; i < 5; i++) await spam('POST', '/api/auth/forgot', { username: 'koffi', recovery_code: 'XXXX', new_password: 'abcdef' });
     assert.equal((await spam('POST', '/api/auth/forgot', { username: 'koffi', recovery_code: fresh.data.recovery_code, new_password: 'abcdef' })).status, 429);
   });
+
+  test('base exportée de la plateforme en ligne : mots de passe SHA-256 acceptés puis convertis', async () => {
+    const browserHash = require('../demo/shims/security').hashPassword('platef0rme');
+    await db.run("INSERT INTO users (username, full_name, role, password_hash, active, created_at) VALUES ('patron', 'Patron', 'admin', ?, 1, '2026-10-28 10:00:00')", browserHash);
+    const call = client();
+    assert.equal((await call('POST', '/api/auth/login', { username: 'patron', password: 'mauvais' })).status, 401);
+    assert.equal((await call('POST', '/api/auth/login', { username: 'patron', password: 'platef0rme' })).status, 200);
+    const stored = (await db.get("SELECT password_hash FROM users WHERE username = 'patron'")).password_hash;
+    assert.match(stored, /^scrypt\$/);
+    assert.equal((await client()('POST', '/api/auth/login', { username: 'patron', password: 'platef0rme' })).status, 200);
+  });
 });

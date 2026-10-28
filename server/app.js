@@ -4,7 +4,7 @@ const path = require('node:path');
 const express = require('express');
 const { HttpError, badRequest, toText } = require('./http');
 const {
-  hashPassword, verifyPassword, newToken, newRecoveryCode, normalizeRecoveryCode, createLoginLimiter,
+  hashPassword, verifyPassword, needsRehash, newToken, newRecoveryCode, normalizeRecoveryCode, createLoginLimiter,
 } = require('./security');
 const { nowLocal, todayLocal, isIsoDate } = require('./time');
 const { seed, hasUsers } = require('./db');
@@ -118,6 +118,9 @@ function createApp(db, { secureCookies = false, trustProxy = 'loopback' } = {}) 
       throw new HttpError(401, "Nom d'utilisateur ou mot de passe incorrect.");
     }
     loginLimiter.reset(key);
+    if (needsRehash(user.password_hash)) {
+      await db.run('UPDATE users SET password_hash = ? WHERE id = ?', hashPassword(password), user.id);
+    }
     await db.run('DELETE FROM sessions WHERE expires_at <= ?', Date.now());
     const token = newToken();
     await db.run('INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)',

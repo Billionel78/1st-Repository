@@ -76,4 +76,4 @@ function createLoginLimiter() {
   return { isBlocked: () => false, fail() {}, reset() {} };
 }
 
-module.exports = { hashPassword, verifyPassword, newToken, newRecoveryCode, normalizeRecoveryCode, createLoginLimiter, sha256 };
+module.exports = { hashPassword, verifyPassword, needsRehash: () => false, newToken, newRecoveryCode, normalizeRecoveryCode, createLoginLimiter, sha256 };

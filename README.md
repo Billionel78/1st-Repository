@@ -229,6 +229,12 @@ légers) et SQLite en WebAssembly (sql.js) :
 
 Dans ces versions, l'impression affiche le ticket à l'écran (le lecteur claude.ai bloque l'impression).
 
+### Reprendre en local une base de la plateforme en ligne
+
+Une base exportée de la plateforme claude.ai (fichier SQLite) s'utilise telle quelle : copiez-la en
+`data/ice-manager.db` (ou indiquez son chemin avec `DB_FILE=…`) puis `npm run dev`. Les mots de passe créés en ligne
+(empreintes SHA-256 de la version navigateur) sont acceptés et convertis en scrypt à la première connexion.
+
 ## Tests
 
 ```bash

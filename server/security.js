@@ -10,9 +10,26 @@ function hashPassword(password) {
   return `scrypt$${salt}$${hash}`;
 }
 
+// Empreintes créées par la version navigateur (plateforme claude.ai) : SHA-256 salé et itéré
+// (voir demo/shims/security.js). Acceptées pour reprendre une base exportée ; remplacées par scrypt à la connexion.
+function deriveSha256(password, salt) {
+  const sha = (s) => crypto.createHash('sha256').update(s, 'utf8').digest('hex');
+  let h = sha(`${salt}:${password}`);
+  for (let i = 0; i < 500; i++) h = sha(h + salt);
+  return h;
+}
+
+const needsRehash = (stored) => !String(stored).startsWith('scrypt$');
+
 function verifyPassword(password, stored) {
   const [scheme, salt, hash] = String(stored).split('$');
-  if (scheme !== 'scrypt' || !salt || !hash) return false;
+  if (!salt || !hash) return false;
+  if (scheme === 'sha256') {
+    const actual = Buffer.from(deriveSha256(String(password), salt), 'hex');
+    const expected = Buffer.from(hash, 'hex');
+    return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+  }
+  if (scheme !== 'scrypt') return false;
   const expected = Buffer.from(hash, 'hex');
   const actual = crypto.scryptSync(String(password), salt, expected.length);
   return crypto.timingSafeEqual(expected, actual);
@@ -55,4 +72,4 @@ function createLoginLimiter({ maxAttempts = 5, windowMs = 5 * 60 * 1000 } = {}) 
   };
 }
 
-module.exports = { hashPassword, verifyPassword, newToken, newRecoveryCode, normalizeRecoveryCode, createLoginLimiter };
+module.exports = { hashPassword, verifyPassword, needsRehash, newToken, newRecoveryCode, normalizeRecoveryCode, createLoginLimiter };
