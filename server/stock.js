@@ -7,13 +7,13 @@ const { nowLocal } = require('./time');
  * `delta` est signé : positif pour une entrée, négatif pour une sortie.
  * `q` est la transaction en cours.
  */
-async function applyStockMovement(q, { productId, type, delta, unitCost = null, note = null, orderId = null, userId = null, at }) {
+async function applyStockMovement(q, { productId, type, delta, unitCost = null, note = null, orderId = null, purchaseId = null, userId = null, at }) {
   const now = at ?? nowLocal();
   await q.run('UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?', delta, now, productId);
   const { stock } = await q.get('SELECT stock FROM products WHERE id = ?', productId);
   await q.run(`INSERT INTO stock_movements
-    (product_id, type, quantity, stock_after, unit_cost, note, order_id, created_by, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, productId, type, delta, stock, unitCost, note, orderId, userId, now);
+    (product_id, type, quantity, stock_after, unit_cost, note, order_id, purchase_id, created_by, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, productId, type, delta, stock, unitCost, note, orderId, purchaseId, userId, now);
   return stock;
 }
 

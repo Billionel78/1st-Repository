@@ -554,7 +554,7 @@ const NAV = [
   { href: '#/clients', icon: '👥', label: 'Clients', match: /^#\/clients?/ },
   { href: '#/historique', icon: '📅', label: 'Historique', short: 'Histo.', match: /^#\/historique/ },
   { href: '#/statistiques', icon: '📊', label: 'Statistiques', short: 'Stats', match: /^#\/statistiques/, admin: true },
-  { href: '#/stock', icon: '📦', label: 'Stock', match: /^#\/stock/, admin: true, badge: 'stock-alerts' },
+  { href: '#/stock', icon: '📦', label: 'Stock', match: /^#\/(stock|fournisseurs?|approvisionner|appro\/)/, admin: true, badge: 'stock-alerts' },
   { href: '#/gestion', icon: '⚙️', label: 'Gestion', short: 'Gérer', match: /^#\/gestion/, admin: true },
 ];
 
@@ -597,6 +597,10 @@ const ROUTES = [
   [/^#\/client\/(\d+)$/, (m, seq) => renderCustomer(Number(m[1]), seq)],
   [/^#\/statistiques$/, (m, seq) => renderStats(m, seq), true],
   [/^#\/stock$/, (m, seq) => renderStock(m, seq), true],
+  [/^#\/fournisseurs$/, (m, seq) => renderSuppliers(m, seq), true],
+  [/^#\/fournisseur\/(\d+)$/, (m, seq) => renderSupplier(Number(m[1]), seq), true],
+  [/^#\/approvisionner(?:\/(\d+))?$/, (m, seq) => renderPurchaseForm(m[1] ? Number(m[1]) : null, seq), true],
+  [/^#\/appro\/(\d+)$/, (m, seq) => renderPurchase(Number(m[1]), seq), true],
   [/^#\/gestion(?:\/(\w+))?$/, (m, seq) => renderAdmin(m[1] || 'produits', seq), true],
 ];
 
@@ -1638,6 +1642,8 @@ async function renderStock(m, seq) {
     <div class="page-head">
       <div><h1>Stock</h1><div class="muted">Entrées, pertes, inventaires et historique des mouvements</div></div>
       <div class="actions">
+        <a class="btn btn-primary" href="#/approvisionner">📥 Approvisionner</a>
+        <a class="btn" href="#/fournisseurs">🚚 Fournisseurs</a>
         <a class="btn" href="/api/reports/stock.csv" download>⬇️ État du stock (Excel)</a>
         <a class="btn" href="/api/reports/stock-movements.csv?from=${addDays(today, -30)}&to=${today}" download>⬇️ Mouvements 30 jours</a>
       </div>
@@ -1724,6 +1730,467 @@ async function renderStock(m, seq) {
       const list = await api('GET', `/api/stock/movements?product_id=${p.id}&limit=200`);
       openModal({ title: `Historique du stock · ${esc(p.name)}`, wide: true, body: movementsTable(list, { showProduct: false }) });
     } catch (err) { toast(err.message, 'err'); }
+  }));
+}
+
+/* =====================================================================
+ * Fournisseurs et approvisionnements (responsable)
+ * ===================================================================== */
+const packLabel = (size) => (size > 1 ? `Cond. de ${nf.format(size)}` : 'À l’unité');
+const unitOf = (packPrice, packSize) => Math.round(packPrice / packSize);
+
+function purchaseStatus(p) {
+  if (p.status === 'cancelled') return '<span class="badge badge-cancelled">Annulé</span>';
+  if (p.remaining <= 0) return '<span class="badge badge-paid">Payé</span>';
+  return p.paid_amount > 0
+    ? `<span class="badge badge-open">Reste ${money(p.remaining)}</span>`
+    : '<span class="badge badge-open">À payer</span>';
+}
+
+function purchasesTable(list, { showSupplier = true } = {}) {
+  if (!list.length) return '<div class="empty">Aucun approvisionnement.</div>';
+  return `<div class="table-wrap"><table class="data">
+    <thead><tr><th>Date</th><th>N°</th>${showSupplier ? '<th>Fournisseur</th>' : ''}<th class="right">Montant</th><th>Règlement</th></tr></thead>
+    <tbody>${list.map((p) => `<tr class="clickable" data-purchase="${p.id}">
+      <td class="num">${fmtDateTime(p.created_at)}</td><td class="num">${esc(p.number)}</td>
+      ${showSupplier ? `<td>${esc(p.supplier_name)}</td>` : ''}
+      <td class="right num"><strong>${money(p.total)}</strong></td><td>${purchaseStatus(p)}</td></tr>`).join('')}</tbody>
+  </table></div>`;
+}
+function bindPurchaseRows(root) {
+  $$('tr[data-purchase]', root).forEach((tr) => tr.addEventListener('click', () => { location.hash = `#/appro/${tr.dataset.purchase}`; }));
+}
+
+/** Formulaire fournisseur (création ou modification). Résout le fournisseur enregistré. */
+function openSupplierForm(supplier = null) {
+  return new Promise((resolve) => {
+    formModal({
+      title: supplier ? `Modifier « ${supplier.name} »` : 'Nouveau fournisseur',
+      fields: [
+        { name: 'name', label: 'Nom du fournisseur', required: true, value: supplier?.name, maxlength: 80, autocomplete: 'off',
+          placeholder: 'Ex. : Solibra, Brassivoire, grossiste…' },
+        { name: 'contact', label: 'Personne à contacter (facultatif)', value: supplier?.contact, maxlength: 80 },
+        { name: 'phone', label: 'Téléphone (facultatif)', value: supplier?.phone, maxlength: 30 },
+        { name: 'address', label: 'Adresse (facultatif)', value: supplier?.address, maxlength: 200 },
+        { name: 'notes', label: 'Notes (facultatif)', value: supplier?.notes, maxlength: 300, placeholder: 'Ex. : livre le mardi, paiement à 15 jours' },
+      ],
+      submitLabel: supplier ? 'Enregistrer' : 'Créer le fournisseur',
+      onSubmit: async (v) => {
+        const saved = supplier
+          ? await api('PUT', `/api/suppliers/${supplier.id}`, v)
+          : await api('POST', '/api/suppliers', v);
+        toast(supplier ? 'Fournisseur modifié.' : `Fournisseur « ${saved.name} » enregistré.`, 'ok');
+        resolve(saved);
+      },
+    });
+  });
+}
+
+/** Ajout ou modification d'un prix du catalogue d'un fournisseur. */
+function openPriceForm(supplier, products, line = null) {
+  const inCatalog = new Set(supplier.prices.map((p) => p.product_id));
+  const choices = line ? products.filter((p) => p.id === line.product_id) : products.filter((p) => !inCatalog.has(p.id));
+  if (!choices.length) { toast('Tous vos produits sont déjà dans ce catalogue.'); return; }
+  formModal({
+    title: line ? `Prix de « ${line.product_name} »` : `Ajouter au catalogue de ${supplier.name}`,
+    fields: [
+      { name: 'product_id', label: 'Produit', type: 'select', required: true, value: line?.product_id ?? '',
+        options: [...(line ? [] : [{ value: '', label: '— Choisir un produit —' }]),
+          ...choices.map((p) => ({ value: p.id, label: `${p.name}${p.format ? ` (${p.format})` : ''} · ${p.family_name}` }))] },
+      { name: 'pack_size', label: 'Unités par conditionnement', type: 'number', min: 1, required: true, value: line?.pack_size ?? 1,
+        hint: 'Ex. : 12 pour un casier de 12 bouteilles, 24 pour un carton, 1 si acheté à l’unité.' },
+      { name: 'pack_price', label: `Prix d’achat du conditionnement (${state.settings.currency})`, type: 'number', min: 0, required: true,
+        value: line?.pack_price ?? '' },
+    ],
+    submitLabel: 'Enregistrer le prix',
+    onSubmit: async (v) => {
+      if (!v.product_id) throw new Error('Choisissez un produit.');
+      const r = await api('PUT', `/api/suppliers/${supplier.id}/prices/${v.product_id}`, {
+        pack_size: Number(v.pack_size), pack_price: Number(v.pack_price),
+      });
+      toast(`Prix enregistré : ${money(r.unit_cost)} l’unité.`, 'ok');
+      route();
+    },
+  });
+}
+
+async function renderSuppliers(m, seq) {
+  const [suppliers, recent] = await Promise.all([api('GET', '/api/suppliers'), api('GET', '/api/purchases')]);
+  if (seq !== renderSeq) return;
+  const today = isoDate();
+  const due = suppliers.reduce((a, s) => a + s.balance_due, 0);
+  const monthStart = `${today.slice(0, 8)}01`;
+  const month = recent.filter((p) => p.status === 'received' && p.created_at.slice(0, 10) >= monthStart);
+  const view = $('#view');
+  view.innerHTML = `
+    <div class="page-head">
+      <div class="row">
+        <a class="btn btn-icon" href="#/stock" aria-label="Retour au stock">←</a>
+        <div><h1>🚚 Fournisseurs</h1><div class="muted">Catalogues de prix et approvisionnements du stock</div></div>
+      </div>
+      <div class="actions">
+        <a class="btn btn-primary" href="#/approvisionner">📥 Approvisionner</a>
+        <button class="btn" type="button" id="add-supplier">＋ Nouveau fournisseur</button>
+        <a class="btn" href="/api/reports/purchases.csv?from=${addDays(today, -30)}&to=${today}" download>⬇️ Achats 30 jours</a>
+      </div>
+    </div>
+    <div class="kpis">
+      ${kpi('Fournisseurs', suppliers.length)}
+      ${kpi('Achats du mois', money(month.reduce((a, p) => a + p.total, 0)), `${month.length} approvisionnement(s)`)}
+      ${kpi('Reste à payer', money(due), due ? 'Dettes fournisseurs' : 'Tout est réglé', true)}
+    </div>
+    <div class="section">
+      ${suppliers.length ? `<div class="customer-grid">${suppliers.map((s) => `
+        <a class="customer-card" href="#/fournisseur/${s.id}">
+          <div class="row"><strong class="customer-name">${esc(s.name)}</strong><span class="spacer"></span>
+            ${s.balance_due > 0 ? `<span class="badge badge-open">Doit ${money(s.balance_due)}</span>` : ''}</div>
+          <div class="muted small">${[s.contact ? `👤 ${esc(s.contact)}` : '', s.phone ? `📞 ${esc(s.phone)}` : ''].filter(Boolean).join(' · ') || '&nbsp;'}</div>
+          <div class="customer-stats">
+            <span><strong class="num">${s.products_count}</strong> produit(s)</span>
+            <span><strong class="num">${money(s.total_purchased)}</strong> d’achats</span>
+            <span class="muted">${s.last_purchase ? `Dernier : ${fmtDate(s.last_purchase)}` : 'Aucun achat'}</span>
+          </div>
+        </a>`).join('')}</div>`
+      : '<div class="empty">Aucun fournisseur. Ajoutez-en un avec « Nouveau fournisseur », puis renseignez son catalogue de prix.</div>'}
+    </div>
+    <div class="section">
+      <h2>📥 Derniers approvisionnements</h2>
+      ${purchasesTable(recent.slice(0, 30))}
+    </div>`;
+  bindPurchaseRows(view);
+  $('#add-supplier', view).addEventListener('click', async () => {
+    const s = await openSupplierForm();
+    location.hash = `#/fournisseur/${s.id}`;
+  });
+}
+
+async function renderSupplier(id, seq) {
+  const [s, products] = await Promise.all([api('GET', `/api/suppliers/${id}`), api('GET', '/api/products')]);
+  if (seq !== renderSeq) return;
+  const view = $('#view');
+  const marginOf = (p) => (p.price > 0 ? Math.round(((p.price - p.unit_cost) / p.price) * 100) : null);
+  view.innerHTML = `
+    <div class="page-head">
+      <div class="row">
+        <a class="btn btn-icon" href="#/fournisseurs" aria-label="Retour">←</a>
+        <div><h1>🚚 ${esc(s.name)}</h1><div class="muted small">Fournisseur depuis le ${fmtDate(s.created_at)}</div></div>
+      </div>
+      <div class="actions">
+        <a class="btn btn-primary" href="#/approvisionner/${s.id}">📥 Approvisionner</a>
+        <button class="btn" type="button" id="edit-supplier">Modifier</button>
+        <button class="btn btn-danger" type="button" id="delete-supplier">Supprimer</button>
+      </div>
+    </div>
+    <div class="kpis">
+      ${kpi('Total des achats', money(s.total_purchased), `${s.purchases_count} approvisionnement(s)`)}
+      ${kpi('Reste à payer', money(s.balance_due), '', s.balance_due > 0)}
+      ${kpi('Produits au catalogue', s.products_count)}
+      ${kpi('Dernier achat', s.last_purchase ? fmtDate(s.last_purchase) : '—')}
+    </div>
+    <div class="card section customer-info">
+      <div><span class="muted small">Contact</span><br>${s.contact ? esc(s.contact) : '—'}</div>
+      <div><span class="muted small">Téléphone</span><br>${s.phone ? `<a href="tel:${esc(s.phone.replace(/\s/g, ''))}">${esc(s.phone)}</a>` : '—'}</div>
+      <div><span class="muted small">Adresse</span><br>${s.address ? esc(s.address) : '—'}</div>
+      <div class="customer-notes"><span class="muted small">Notes</span><br>${s.notes ? esc(s.notes) : '—'}</div>
+    </div>
+    <div class="section">
+      <div class="row"><h2>💰 Catalogue de prix</h2><span class="spacer"></span>
+        <button class="btn btn-sm" type="button" id="add-price">＋ Ajouter un produit</button></div>
+      ${s.prices.length ? `<div class="table-wrap"><table class="data">
+        <thead><tr><th>Produit</th><th>Conditionnement</th><th class="right">Prix du cond.</th><th class="right">Prix unitaire</th>
+          <th class="right">Prix de vente</th><th class="right">Marge</th><th class="right">Actions</th></tr></thead>
+        <tbody>${s.prices.map((p) => {
+          const margin = marginOf(p);
+          return `<tr>
+          <td><strong>${esc(p.product_name)}</strong>${p.format ? ` <span class="muted small">${esc(p.format)}</span>` : ''}<br>
+            <span class="muted small">${esc(p.family_name)} · mis à jour le ${fmtDate(p.updated_at)}</span></td>
+          <td>${packLabel(p.pack_size)}</td>
+          <td class="right num">${money(p.pack_price)}</td>
+          <td class="right num"><strong>${money(p.unit_cost)}</strong></td>
+          <td class="right num">${money(p.price)}</td>
+          <td class="right num">${margin === null ? '—' : `<span class="${margin < 0 ? 'text-danger' : ''}">${margin} %</span>`}</td>
+          <td class="right"><div class="row" style="justify-content:flex-end">
+            <button class="btn btn-sm" data-edit-price="${p.product_id}">Modifier</button>
+            <button class="btn btn-sm btn-ghost" data-remove-price="${p.product_id}" aria-label="Retirer du catalogue">Retirer</button>
+          </div></td></tr>`;
+        }).join('')}</tbody></table></div>`
+      : '<div class="empty">Catalogue vide. Ajoutez les produits que vous achetez chez ce fournisseur et leur prix.<br>Les prix sont aussi enregistrés automatiquement à chaque approvisionnement.</div>'}
+    </div>
+    <div class="section">
+      <h2>📥 Approvisionnements</h2>
+      ${purchasesTable(s.purchases, { showSupplier: false })}
+    </div>`;
+  bindPurchaseRows(view);
+  $('#edit-supplier', view).addEventListener('click', async () => { await openSupplierForm(s); route(); });
+  $('#delete-supplier', view).addEventListener('click', async () => {
+    if (!(await confirmModal('Supprimer le fournisseur', `Supprimer « ${esc(s.name)} » et son catalogue de prix ?
+      Ses approvisionnements restent dans l’historique.`, { confirmLabel: 'Supprimer', danger: true }))) return;
+    try {
+      await api('DELETE', `/api/suppliers/${s.id}`);
+      toast('Fournisseur supprimé.', 'ok');
+      location.hash = '#/fournisseurs';
+    } catch (err) { toast(err.message, 'err'); }
+  });
+  $('#add-price', view).addEventListener('click', () => openPriceForm(s, products));
+  $$('[data-edit-price]', view).forEach((b) => b.addEventListener('click', () =>
+    openPriceForm(s, products, s.prices.find((p) => p.product_id === Number(b.dataset.editPrice)))));
+  $$('[data-remove-price]', view).forEach((b) => b.addEventListener('click', async () => {
+    const p = s.prices.find((x) => x.product_id === Number(b.dataset.removePrice));
+    if (!(await confirmModal('Retirer du catalogue', `Retirer « ${esc(p.product_name)} » du catalogue de ${esc(s.name)} ?`,
+      { confirmLabel: 'Retirer' }))) return;
+    try {
+      await api('DELETE', `/api/suppliers/${s.id}/prices/${p.product_id}`);
+      route();
+    } catch (err) { toast(err.message, 'err'); }
+  }));
+}
+
+/** Saisie d'une livraison : les quantités entrent en stock à la validation. */
+async function renderPurchaseForm(supplierId, seq) {
+  const [suppliers, products, stock] = await Promise.all([
+    api('GET', '/api/suppliers'), api('GET', '/api/products'), api('GET', '/api/stock'),
+  ]);
+  if (seq !== renderSeq) return;
+  const view = $('#view');
+  if (!suppliers.length) {
+    view.innerHTML = `<div class="empty">Enregistrez d’abord un fournisseur.<br><br>
+      <a class="btn btn-primary" href="#/fournisseurs">🚚 Fournisseurs</a></div>`;
+    return;
+  }
+  const form = { supplierId: supplierId || (suppliers.length === 1 ? suppliers[0].id : null), catalog: [], lines: [], paid: 'all' };
+  const productById = new Map(products.map((p) => [p.id, p]));
+  view.innerHTML = `
+    <div class="page-head">
+      <div class="row">
+        <a class="btn btn-icon" href="${supplierId ? `#/fournisseur/${supplierId}` : '#/fournisseurs'}" aria-label="Retour">←</a>
+        <div><h1>📥 Approvisionner le stock</h1><div class="muted">Saisissez la livraison : le stock et les prix d’achat sont mis à jour à la validation.</div></div>
+      </div>
+    </div>
+    <div class="card section form-grid purchase-head">
+      <label>Fournisseur
+        <select id="pu-supplier">
+          <option value="">— Choisir le fournisseur —</option>
+          ${suppliers.map((s) => `<option value="${s.id}" ${s.id === form.supplierId ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
+        </select></label>
+      <label>Note (n° de bon de livraison…)<input id="pu-note" maxlength="200" autocomplete="off"></label>
+    </div>
+    <div class="section">
+      <h2>Produits reçus</h2>
+      <div id="pu-lines"></div>
+      <div class="row purchase-add">
+        <select id="pu-add" aria-label="Ajouter un produit"></select>
+        <button class="btn btn-sm" type="button" id="pu-add-catalog">＋ Tout le catalogue</button>
+        <button class="btn btn-sm" type="button" id="pu-add-alerts">＋ Produits en stock bas</button>
+      </div>
+    </div>
+    <div class="card section purchase-summary">
+      <div class="row"><span>Total de la livraison</span><span class="spacer"></span><strong class="num purchase-total" id="pu-total">${money(0)}</strong></div>
+      <div class="seg" role="group" aria-label="Règlement">
+        <button type="button" data-paid="all" class="active">Payé en totalité</button>
+        <button type="button" data-paid="credit">À crédit</button>
+        <button type="button" data-paid="part">Payé en partie</button>
+      </div>
+      <label id="pu-paid-wrap" hidden>Montant payé (${state.settings.currency})<input id="pu-paid" type="number" min="0" step="1" inputmode="numeric"></label>
+      <label class="check"><input type="checkbox" id="pu-update" checked> Enregistrer ces prix dans le catalogue du fournisseur</label>
+      <p class="form-error" id="pu-error" role="alert"></p>
+      <button class="btn btn-primary btn-lg btn-block" type="button" id="pu-submit">Valider la réception</button>
+    </div>`;
+
+  const total = () => form.lines.reduce((a, l) => a + (l.packs || 0) * (l.pack_price || 0), 0);
+  const paintTotal = () => { $('#pu-total', view).textContent = money(total()); };
+
+  const paintAdd = () => {
+    const inLines = new Set(form.lines.map((l) => l.product_id));
+    const catIds = new Set(form.catalog.map((c) => c.product_id));
+    const cat = form.catalog.filter((c) => !inLines.has(c.product_id));
+    const others = products.filter((p) => !inLines.has(p.id) && !catIds.has(p.id));
+    $('#pu-add', view).innerHTML = `<option value="">＋ Ajouter un produit…</option>
+      ${cat.length ? `<optgroup label="Catalogue du fournisseur">${cat.map((c) =>
+        `<option value="${c.product_id}">${esc(c.product_name)} — ${money(c.pack_price)} (${packLabel(c.pack_size).toLowerCase()})</option>`).join('')}</optgroup>` : ''}
+      <optgroup label="${cat.length ? 'Autres produits' : 'Produits'}">${others.map((p) =>
+        `<option value="${p.id}">${esc(p.name)}${p.format ? ` (${esc(p.format)})` : ''}</option>`).join('')}</optgroup>`;
+  };
+
+  const paintLines = () => {
+    $('#pu-lines', view).innerHTML = form.lines.length ? form.lines.map((l, i) => {
+      const p = productById.get(l.product_id);
+      return `<div class="purchase-line" data-i="${i}">
+        <div class="pl-name"><strong>${esc(p?.name ?? '')}</strong>
+          <span class="muted small">${p?.track_stock ? `Stock actuel : ${nf.format(p.stock)}` : 'Stock non suivi'}</span></div>
+        <label>Quantité<input type="number" min="1" step="1" inputmode="numeric" data-f="packs" value="${l.packs ?? ''}"></label>
+        <label>Unités / cond.<input type="number" min="1" step="1" inputmode="numeric" data-f="pack_size" value="${l.pack_size}"></label>
+        <label>Prix du cond.<input type="number" min="0" step="1" inputmode="numeric" data-f="pack_price" value="${l.pack_price ?? ''}"></label>
+        <div class="pl-total"><span class="muted small" data-unit>${l.pack_price != null && l.pack_size ? `${money(unitOf(l.pack_price, l.pack_size))} / unité` : ''}</span>
+          <strong class="num" data-line-total>${money((l.packs || 0) * (l.pack_price || 0))}</strong>
+          <span class="muted small" data-units>${l.packs && l.pack_size > 1 ? `= ${nf.format(l.packs * l.pack_size)} unités` : ''}</span></div>
+        <button class="btn btn-icon btn-ghost" type="button" data-remove aria-label="Retirer la ligne">✕</button>
+      </div>`;
+    }).join('') : '<div class="empty">Ajoutez les produits livrés avec la liste ci-dessous.</div>';
+    paintAdd();
+    paintTotal();
+  };
+
+  const addLine = (productId) => {
+    if (form.lines.some((l) => l.product_id === productId)) return;
+    const c = form.catalog.find((x) => x.product_id === productId);
+    const p = productById.get(productId);
+    form.lines.push({
+      product_id: productId, packs: null,
+      pack_size: c?.pack_size ?? 1, pack_price: c?.pack_price ?? (p?.cost_price || null),
+    });
+  };
+
+  const loadCatalog = async () => {
+    form.catalog = form.supplierId ? (await api('GET', `/api/suppliers/${form.supplierId}`)).prices : [];
+    // Lignes déjà saisies : prix du nouveau fournisseur s'il en a un.
+    for (const l of form.lines) {
+      const c = form.catalog.find((x) => x.product_id === l.product_id);
+      if (c) Object.assign(l, { pack_size: c.pack_size, pack_price: c.pack_price });
+    }
+    paintLines();
+  };
+
+  $('#pu-supplier', view).addEventListener('change', async (e) => {
+    form.supplierId = e.target.value ? Number(e.target.value) : null;
+    try { await loadCatalog(); } catch (err) { toast(err.message, 'err'); }
+  });
+  $('#pu-add', view).addEventListener('change', (e) => {
+    if (!e.target.value) return;
+    addLine(Number(e.target.value));
+    paintLines();
+    $(`.purchase-line:last-child [data-f="packs"]`, view)?.focus();
+  });
+  $('#pu-add-catalog', view).addEventListener('click', () => {
+    if (!form.catalog.length) { toast(form.supplierId ? 'Le catalogue de ce fournisseur est vide.' : 'Choisissez d’abord le fournisseur.'); return; }
+    form.catalog.forEach((c) => addLine(c.product_id));
+    paintLines();
+  });
+  $('#pu-add-alerts', view).addEventListener('click', () => {
+    const low = stock.filter((s) => s.status !== 'ok');
+    if (!low.length) { toast('Aucun produit en stock bas.', 'ok'); return; }
+    low.forEach((s) => addLine(s.id));
+    paintLines();
+  });
+  $('#pu-lines', view).addEventListener('input', (e) => {
+    const row = e.target.closest('.purchase-line');
+    if (!row || !e.target.dataset.f) return;
+    const l = form.lines[Number(row.dataset.i)];
+    l[e.target.dataset.f] = e.target.value === '' ? null : Number(e.target.value);
+    $('[data-line-total]', row).textContent = money((l.packs || 0) * (l.pack_price || 0));
+    $('[data-unit]', row).textContent = l.pack_price != null && l.pack_size ? `${money(unitOf(l.pack_price, l.pack_size))} / unité` : '';
+    $('[data-units]', row).textContent = l.packs && l.pack_size > 1 ? `= ${nf.format(l.packs * l.pack_size)} unités` : '';
+    paintTotal();
+  });
+  $('#pu-lines', view).addEventListener('click', (e) => {
+    if (!e.target.closest('[data-remove]')) return;
+    form.lines.splice(Number(e.target.closest('.purchase-line').dataset.i), 1);
+    paintLines();
+  });
+  $$('[data-paid]', view).forEach((b) => b.addEventListener('click', () => {
+    form.paid = b.dataset.paid;
+    $$('[data-paid]', view).forEach((x) => x.classList.toggle('active', x === b));
+    $('#pu-paid-wrap', view).hidden = form.paid !== 'part';
+    if (form.paid === 'part') $('#pu-paid', view).focus();
+  }));
+
+  $('#pu-submit', view).addEventListener('click', async () => {
+    const error = $('#pu-error', view);
+    error.textContent = '';
+    try {
+      if (!form.supplierId) throw new Error('Choisissez le fournisseur.');
+      if (!form.lines.length) throw new Error('Ajoutez au moins un produit.');
+      const bad = form.lines.find((l) => !l.packs || l.packs < 1 || !l.pack_size || l.pack_price == null);
+      if (bad) throw new Error(`Complétez la quantité et le prix de « ${productById.get(bad.product_id)?.name} ».`);
+      const t = total();
+      let paid;
+      if (form.paid === 'all') paid = 'all';
+      else if (form.paid === 'credit') paid = 0;
+      else {
+        paid = Number($('#pu-paid', view).value);
+        if (!Number.isInteger(paid) || paid < 0 || paid > t) throw new Error(`Le montant payé doit être compris entre 0 et ${money(t)}.`);
+      }
+      const supplier = suppliers.find((s) => s.id === form.supplierId);
+      const ok = await confirmModal('Valider la réception', `Réception de <strong>${form.lines.length} produit(s)</strong>
+        chez ${esc(supplier.name)} pour <strong>${money(t)}</strong>. Le stock sera augmenté. Continuer ?`, { confirmLabel: 'Valider' });
+      if (!ok) return;
+      $('#pu-submit', view).disabled = true;
+      const p = await api('POST', '/api/purchases', {
+        supplier_id: form.supplierId,
+        note: $('#pu-note', view).value.trim() || undefined,
+        paid_amount: paid,
+        update_prices: $('#pu-update', view).checked,
+        items: form.lines.map((l) => ({ product_id: l.product_id, packs: l.packs, pack_size: l.pack_size, pack_price: l.pack_price })),
+      });
+      toast(`Approvisionnement ${p.number} enregistré : stock mis à jour.`, 'ok');
+      location.hash = `#/appro/${p.id}`;
+    } catch (err) {
+      error.textContent = err.message;
+      $('#pu-submit', view).disabled = false;
+    }
+  });
+
+  try { await loadCatalog(); } catch { paintLines(); }
+}
+
+async function renderPurchase(id, seq) {
+  const p = await api('GET', `/api/purchases/${id}`);
+  if (seq !== renderSeq) return;
+  const view = $('#view');
+  const active = p.status === 'received';
+  view.innerHTML = `
+    <div class="page-head">
+      <div class="row">
+        <a class="btn btn-icon" href="#/fournisseur/${p.supplier_id}" aria-label="Retour">←</a>
+        <div><h1>📥 ${esc(p.number)}</h1>
+          <div class="muted small">${esc(p.supplier_name)} · ${fmtDateTime(p.created_at)}${p.created_by_name ? ` · par ${esc(p.created_by_name)}` : ''}</div></div>
+      </div>
+      <div class="actions">
+        ${active && p.remaining > 0 ? '<button class="btn btn-primary" type="button" id="pay-purchase">💵 Enregistrer un paiement</button>' : ''}
+        ${active ? '<button class="btn btn-danger" type="button" id="cancel-purchase">Annuler</button>' : ''}
+      </div>
+    </div>
+    ${p.status === 'cancelled' ? `<div class="banner banner-warn section">Approvisionnement annulé : ${esc(p.cancel_reason || '')}.
+      Les quantités ont été retirées du stock.</div>` : ''}
+    <div class="kpis">
+      ${kpi('Montant', money(p.total), '', true)}
+      ${kpi('Payé', money(p.paid_amount))}
+      ${kpi('Reste à payer', money(Math.max(p.remaining, 0)))}
+      ${kpi('Statut', purchaseStatus(p))}
+    </div>
+    ${p.note ? `<div class="card section"><span class="muted small">Note</span><br>${esc(p.note)}</div>` : ''}
+    <div class="section">
+      <div class="table-wrap"><table class="data">
+        <thead><tr><th>Produit</th><th class="right">Quantité</th><th>Conditionnement</th><th class="right">Unités reçues</th>
+          <th class="right">Prix du cond.</th><th class="right">Coût unitaire</th><th class="right">Montant</th></tr></thead>
+        <tbody>${p.items.map((i) => `<tr>
+          <td><strong>${esc(i.product_name)}</strong>${i.track_stock ? '' : '<br><span class="muted small">Stock non suivi</span>'}</td>
+          <td class="right num">${nf.format(i.packs)}</td><td>${packLabel(i.pack_size)}</td>
+          <td class="right num">${nf.format(i.quantity)}</td><td class="right num">${money(i.pack_price)}</td>
+          <td class="right num">${money(i.unit_cost)}</td><td class="right num"><strong>${money(i.total)}</strong></td></tr>`).join('')}</tbody>
+        <tfoot><tr><td colspan="6"><strong>Total</strong></td><td class="right num"><strong>${money(p.total)}</strong></td></tr></tfoot>
+      </table></div>
+    </div>`;
+  $('#pay-purchase', view)?.addEventListener('click', () => formModal({
+    title: `Paiement à ${p.supplier_name}`,
+    fields: [{ name: 'amount', label: `Montant payé (${state.settings.currency})`, type: 'number', min: 1, max: p.remaining,
+      required: true, value: p.remaining, hint: `Reste à payer : ${money(p.remaining)}` }],
+    submitLabel: 'Enregistrer le paiement',
+    onSubmit: async (v) => {
+      await api('POST', `/api/purchases/${p.id}/payments`, { amount: Number(v.amount) });
+      toast('Paiement enregistré.', 'ok');
+      route();
+    },
+  }));
+  $('#cancel-purchase', view)?.addEventListener('click', () => formModal({
+    title: `Annuler ${p.number}`,
+    fields: [{ name: 'reason', label: 'Motif (erreur de saisie, livraison retournée…)', required: true, maxlength: 200,
+      hint: 'Les quantités reçues seront retirées du stock.' }],
+    submitLabel: 'Annuler l’approvisionnement',
+    onSubmit: async (v) => {
+      await api('POST', `/api/purchases/${p.id}/cancel`, v);
+      toast('Approvisionnement annulé : stock corrigé.', 'ok');
+      route();
+    },
   }));
 }
 

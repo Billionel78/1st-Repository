@@ -505,3 +505,29 @@ table.data .row { flex-wrap: nowrap; }
   .nav, .topbar, .page-head .actions, .filters, .toasts { display: none !important; }
   .view { margin: 0; padding: 0; }
 }
+
+/* ---------- Fournisseurs et approvisionnements ---------- */
+.text-danger { color: var(--danger); font-weight: 600; }
+.purchase-head { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.purchase-line {
+  display: grid; grid-template-columns: minmax(160px, 2fr) repeat(3, minmax(90px, 1fr)) minmax(120px, 1.2fr) auto;
+  gap: .6rem; align-items: end; padding: .75rem; border: 1px solid var(--border); border-radius: 12px;
+  background: var(--surface); margin-bottom: .5rem;
+}
+.purchase-line label { display: grid; gap: .25rem; font-size: .8rem; font-weight: 600; color: var(--text-2); min-width: 0; }
+.purchase-line input { width: 100%; min-width: 0; }
+.pl-name { display: grid; gap: .15rem; align-self: center; min-width: 0; overflow-wrap: anywhere; }
+.pl-total { display: grid; justify-items: end; gap: .1rem; text-align: right; }
+.purchase-add { flex-wrap: wrap; gap: .5rem; margin-top: .25rem; }
+.purchase-add select { flex: 1 1 240px; min-width: 0; }
+.purchase-summary { display: grid; gap: .8rem; max-width: 620px; margin-left: auto; }
+.purchase-total { font-size: 1.5rem; }
+@media (max-width: 760px) {
+  .purchase-line { grid-template-columns: repeat(3, minmax(0, 1fr)) auto; }
+  .pl-name { grid-column: 1 / -2; }
+  .purchase-line [data-remove] { grid-column: -2 / -1; grid-row: 1; }
+  .pl-total { grid-column: 1 / -1; grid-template-columns: 1fr auto; justify-items: start; align-items: baseline; }
+  .pl-total [data-units] { grid-column: 1 / -1; }
+}
+.purchase-summary .seg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.purchase-summary .seg button { white-space: normal; line-height: 1.2; padding: .5rem .4rem; }

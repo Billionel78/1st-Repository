@@ -15,6 +15,7 @@ const statsRoutes = require('./routes/stats');
 const userRoutes = require('./routes/users');
 const stockRoutes = require('./routes/stock');
 const reportRoutes = require('./routes/reports');
+const supplierRoutes = require('./routes/suppliers');
 
 const SESSION_COOKIE = 'ice_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // une journée de service
@@ -244,6 +245,7 @@ function createApp(db, { secureCookies = false, trustProxy = 'loopback' } = {}) 
   statsRoutes(app, db, { requireAdmin });
   userRoutes(app, db, { requireAdmin });
   stockRoutes(app, db, { requireAdmin });
+  supplierRoutes(app, db, { requireAdmin });
   reportRoutes(app, db, { requireAdmin });
 
   app.use('/api', (req, res, next) => next(new HttpError(404, 'Ressource introuvable.')));

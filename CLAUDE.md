@@ -15,7 +15,8 @@ clients, stock, rapports, statistiques. Interface et messages en **français**.
 ## Architecture
 
 - `server/app.js` : Express 5, authentification (cookie de session), routes publiques `/api/platform*`, `/api/auth/*`.
-- `server/routes/*.js` : catalogue, commandes, clients, stock, statistiques, rapports CSV, utilisateurs.
+- `server/routes/*.js` : catalogue, commandes, clients, fournisseurs et approvisionnements, stock, statistiques,
+  rapports CSV, utilisateurs. Toute nouvelle route doit aussi être ajoutée à `MODULES` dans `demo/build.js`.
 - `server/database.js` : couche d'accès **asynchrone** commune (`get`, `all`, `run`, `transaction`) pour SQLite,
   PostgreSQL et PGlite. Le SQL s'écrit une fois avec des `?` (convertis en `$n` pour PG).
   Dans une transaction, passer l'objet `tx` aux fonctions appelées (sinon blocage avec PGlite).

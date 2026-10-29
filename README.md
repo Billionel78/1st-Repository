@@ -145,6 +145,23 @@ Le suivi du stock s'active produit par produit (Gestion → Produits → « Acti
 - **Seuil d'alerte** par produit : les produits en stock bas ou en rupture sont signalés sur le
   tableau de bord et dans le menu.
 
+### Fournisseurs et approvisionnements (responsable)
+
+Accès : écran **Stock** → « 🚚 Fournisseurs » ou « 📥 Approvisionner ».
+
+- **Fiche fournisseur** : nom, contact, téléphone, adresse, notes ; total des achats et **reste à payer**.
+- **Catalogue de prix** : pour chaque produit, le prix du **conditionnement** (casier de 12, carton de 24… ou à l'unité).
+  Le prix unitaire et la marge sur le prix de vente sont calculés. `GET /api/supplier-prices?product_id=…` compare
+  les fournisseurs du moins cher au plus cher.
+- **Approvisionner** : choisir le fournisseur, ajouter les produits livrés (un par un, tout le catalogue ou les produits
+  en stock bas), saisir quantités et prix, puis le règlement (payé, à crédit ou en partie). À la validation :
+  - le stock augmente (mouvement « Entrée » lié au bon `ACH-AAAAMMJJ-NNNN`) ;
+  - le prix d'achat des produits devient le dernier coût unitaire payé (marges des rapports à jour) ;
+  - le catalogue du fournisseur garde ces prix (case à décocher si besoin).
+- **Bon d'approvisionnement** : paiements au fournisseur en une ou plusieurs fois ; annulation avec motif
+  (les quantités ressortent du stock).
+- Export Excel : `/api/reports/purchases.csv?from=…&to=…`.
+
 ### Rapports financiers
 
 - Prix d'achat par produit → **coût d'achat des ventes**, **marge brute** et taux de marge dans les

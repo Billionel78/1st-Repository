@@ -108,6 +108,22 @@ module.exports = function reportRoutes(app, db, { requireAdmin }) {
         m.stock_after, m.unit_cost, m.number ?? '', m.note ?? '', m.created_by_name ?? '',
       ]));
   });
+
+  app.get('/api/reports/purchases.csv', requireAdmin, async (req, res) => {
+    const range = parseRange(req.query);
+    const rows = await db.all(`
+      SELECT pu.number, pu.supplier_name, pu.status, pu.created_at, pu.paid_amount, pu.total AS purchase_total,
+        pi.product_name, pi.packs, pi.pack_size, pi.pack_price, pi.quantity, pi.unit_cost, pi.total
+      FROM purchase_items pi JOIN purchases pu ON pu.id = pi.purchase_id
+      WHERE substr(pu.created_at, 1, 10) BETWEEN ? AND ? ORDER BY pu.created_at, pu.id, pi.id`, range.from, range.to);
+    sendCsv(res, `approvisionnements_${suffix(range)}.csv`,
+      ['Date', 'N°', 'Fournisseur', 'Statut', 'Produit', 'Conditionnements', 'Unités par cond.', 'Prix du cond.',
+        'Unités reçues', "Coût unitaire", 'Montant', 'Total appro.', 'Payé'],
+      rows.map((r) => [
+        r.created_at.slice(0, 10), r.number, r.supplier_name, r.status === 'cancelled' ? 'Annulé' : 'Reçu', r.product_name,
+        r.packs, r.pack_size, r.pack_price, r.quantity, r.unit_cost, r.total, r.purchase_total, r.paid_amount,
+      ]));
+  });
 };
 
 module.exports.toCsv = toCsv;
