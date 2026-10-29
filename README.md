@@ -151,7 +151,8 @@ Accès : écran **Stock** → « 🚚 Fournisseurs » ou « 📥 Approvisionner 
 
 - **Fiche fournisseur** : nom, contact, téléphone, adresse, notes ; total des achats et **reste à payer**.
 - **Catalogue de prix** : pour chaque produit, le prix du **conditionnement** (casier de 12, carton de 24… ou à l'unité).
-  Le prix unitaire et la marge sur le prix de vente sont calculés. `GET /api/supplier-prices?product_id=…` compare
+  Le prix unitaire et la marge sur le prix de vente sont calculés. « ⧉ Dupliquer » recopie le conditionnement et le
+  prix d'une ligne vers un autre produit (ou le même produit chez un autre fournisseur) : on ajuste puis on valide. `GET /api/supplier-prices?product_id=…` compare
   les fournisseurs du moins cher au plus cher.
 - **Approvisionner** : choisir le fournisseur, ajouter les produits livrés (un par un, tout le catalogue ou les produits
   en stock bas), saisir quantités et prix, puis le règlement (payé, à crédit ou en partie). À la validation :

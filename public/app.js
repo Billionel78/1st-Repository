@@ -1814,6 +1814,49 @@ function openPriceForm(supplier, products, line = null) {
   });
 }
 
+/**
+ * Duplication d'une ligne du catalogue : même conditionnement et même prix, préremplis.
+ * On choisit un autre produit (ou le même produit chez un autre fournisseur), on ajuste et on valide.
+ */
+async function openDuplicatePriceForm(supplier, products, line) {
+  let suppliers = [supplier];
+  try { suppliers = await api('GET', '/api/suppliers'); } catch { /* duplication chez ce fournisseur seulement */ }
+  const inCatalog = new Set(supplier.prices.map((p) => p.product_id));
+  const others = products.filter((p) => p.id !== line.product_id);
+  // Produits pas encore au catalogue d'abord : ce sont ceux qu'on duplique le plus souvent.
+  others.sort((a, b) => Number(inCatalog.has(a.id)) - Number(inCatalog.has(b.id)));
+  const source = products.find((p) => p.id === line.product_id);
+  const label = (p) => `${p.name}${p.format ? ` (${p.format})` : ''} · ${p.family_name}${inCatalog.has(p.id) ? ' — déjà au catalogue, prix remplacé' : ''}`;
+  formModal({
+    title: `Dupliquer « ${line.product_name} »`,
+    fields: [
+      { name: 'product_id', label: 'Nouveau produit', type: 'select', required: true, value: '',
+        options: [{ value: '', label: '— Choisir le produit —' },
+          ...others.map((p) => ({ value: p.id, label: label(p) })),
+          ...(source && suppliers.length > 1 ? [{ value: source.id, label: `${source.name} (même produit, chez un autre fournisseur)` }] : [])] },
+      ...(suppliers.length > 1 ? [{ name: 'supplier_id', label: 'Fournisseur', type: 'select', value: supplier.id,
+        options: suppliers.map((x) => ({ value: x.id, label: x.name })) }] : []),
+      { name: 'pack_size', label: 'Unités par conditionnement', type: 'number', min: 1, required: true, value: line.pack_size },
+      { name: 'pack_price', label: `Prix d’achat du conditionnement (${state.settings.currency})`, type: 'number', min: 0,
+        required: true, value: line.pack_price },
+    ],
+    submitLabel: 'Valider la copie',
+    onSubmit: async (v) => {
+      if (!v.product_id) throw new Error('Choisissez le produit.');
+      const supplierId = Number(v.supplier_id || supplier.id);
+      if (Number(v.product_id) === line.product_id && supplierId === supplier.id) {
+        throw new Error('Choisissez un autre produit, ou un autre fournisseur.');
+      }
+      const r = await api('PUT', `/api/suppliers/${supplierId}/prices/${v.product_id}`, {
+        pack_size: Number(v.pack_size), pack_price: Number(v.pack_price),
+      });
+      const target = suppliers.find((x) => x.id === supplierId);
+      toast(`Copié${supplierId !== supplier.id ? ` chez ${target?.name}` : ''} : ${money(r.unit_cost)} l’unité.`, 'ok');
+      route();
+    },
+  });
+}
+
 async function renderSuppliers(m, seq) {
   const [suppliers, recent] = await Promise.all([api('GET', '/api/suppliers'), api('GET', '/api/purchases')]);
   if (seq !== renderSeq) return;
@@ -1911,6 +1954,7 @@ async function renderSupplier(id, seq) {
           <td class="right num">${margin === null ? '—' : `<span class="${margin < 0 ? 'text-danger' : ''}">${margin} %</span>`}</td>
           <td class="right"><div class="row" style="justify-content:flex-end">
             <button class="btn btn-sm" data-edit-price="${p.product_id}">Modifier</button>
+            <button class="btn btn-sm" data-dup-price="${p.product_id}" title="Copier ce conditionnement et ce prix vers un autre produit">⧉ Dupliquer</button>
             <button class="btn btn-sm btn-ghost" data-remove-price="${p.product_id}" aria-label="Retirer du catalogue">Retirer</button>
           </div></td></tr>`;
         }).join('')}</tbody></table></div>`
@@ -1934,6 +1978,8 @@ async function renderSupplier(id, seq) {
   $('#add-price', view).addEventListener('click', () => openPriceForm(s, products));
   $$('[data-edit-price]', view).forEach((b) => b.addEventListener('click', () =>
     openPriceForm(s, products, s.prices.find((p) => p.product_id === Number(b.dataset.editPrice)))));
+  $$('[data-dup-price]', view).forEach((b) => b.addEventListener('click', () =>
+    openDuplicatePriceForm(s, products, s.prices.find((p) => p.product_id === Number(b.dataset.dupPrice)))));
   $$('[data-remove-price]', view).forEach((b) => b.addEventListener('click', async () => {
     const p = s.prices.find((x) => x.product_id === Number(b.dataset.removePrice));
     if (!(await confirmModal('Retirer du catalogue', `Retirer « ${esc(p.product_name)} » du catalogue de ${esc(s.name)} ?`,
