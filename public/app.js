@@ -1951,7 +1951,13 @@ async function renderSupplier(id, seq) {
           <td class="right num">${money(p.pack_price)}</td>
           <td class="right num"><strong>${money(p.unit_cost)}</strong></td>
           <td class="right num">${money(p.price)}</td>
-          <td class="right num">${margin === null ? '—' : `<span class="${margin < 0 ? 'text-danger' : ''}">${margin} %</span>`}</td>
+          <td class="right num">${margin === null ? '—' : (() => {
+            const unit = p.price - p.unit_cost;
+            const cls = unit < 0 ? 'text-danger' : '';
+            return `<span class="${cls}"><strong>${margin} %</strong></span>
+              <br><span class="${cls} small">${unit > 0 ? '+' : ''}${money(unit)} / unité</span>
+              ${p.pack_size > 1 ? `<br><span class="${cls || 'muted'} small">${unit > 0 ? '+' : ''}${money(unit * p.pack_size)} / cond.</span>` : ''}`;
+          })()}</td>
           <td class="right"><div class="row" style="justify-content:flex-end">
             <button class="btn btn-sm" data-edit-price="${p.product_id}">Modifier</button>
             <button class="btn btn-sm" data-dup-price="${p.product_id}" title="Copier ce conditionnement et ce prix vers un autre produit">⧉ Dupliquer</button>
