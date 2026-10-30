@@ -22,6 +22,20 @@ Un catalogue de départ (Bières, Vins, Liqueurs, Boissons non alcoolisées, Suc
 8 tables et les moyens de paiement Espèces, Orange Money, MTN Mobile Money et Wave sont créés.
 Tout est modifiable dans **Gestion**.
 
+## Application installable (PWA)
+
+La version serveur s'installe comme une application sur téléphone, tablette ou ordinateur (icône sur l'écran
+d'accueil, ouverture en plein écran). Il faut une adresse **https** (Render, etc.) ou `localhost`.
+
+- **Android / Chrome / Edge** : bouton « 📲 Installer l'application » sur l'écran de connexion ou dans le menu du compte.
+- **iPhone / iPad** : dans Safari, Partager → « Sur l'écran d'accueil » (le bouton affiche ces étapes).
+- `public/manifest.webmanifest` (nom, couleurs, icônes, raccourcis Tables / Commandes / Approvisionner),
+  `public/sw.js` (service worker), `public/icons/` (icônes générées depuis `icon.svg`).
+- Le service worker garde l'interface en cache (réseau d'abord : chaque déploiement est pris automatiquement) mais
+  **jamais les données** `/api/…`. Sans réseau, l'application affiche « Hors connexion » et se reconnecte seule.
+- La version claude.ai (artefact) n'est pas installable : une page hébergée dans claude.ai ne peut pas
+  enregistrer de service worker.
+
 ## Base de données PostgreSQL (Neon…)
 
 Si la variable `DATABASE_URL` est définie, l'application utilise PostgreSQL au lieu de SQLite.

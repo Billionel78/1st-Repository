@@ -509,6 +509,60 @@ $('#login-form').addEventListener('submit', async (e) => {
   }
 });
 
+/* ---------- Application installable (PWA) ----------
+ * Version serveur uniquement : la version navigateur (window.__ICE_MODE) tourne dans claude.ai,
+ * où une page ne peut pas installer de service worker. */
+const pwa = { prompt: null };
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const pwaSupported = !window.__ICE_MODE && 'serviceWorker' in navigator && window.isSecureContext;
+
+function refreshInstall() {
+  const can = pwaSupported && !isStandalone() && Boolean(pwa.prompt || isIos());
+  $('#menu-install').hidden = !can;
+  $('#login-install').hidden = !can;
+}
+
+async function installApp() {
+  if (pwa.prompt) {
+    const prompt = pwa.prompt;
+    pwa.prompt = null;
+    prompt.prompt();
+    await prompt.userChoice.catch(() => null);
+    refreshInstall();
+    return;
+  }
+  // iPhone / iPad : pas de bouton d'installation automatique, on explique les 3 gestes.
+  openModal({
+    title: '📲 Installer sur iPhone ou iPad',
+    body: `<ol class="install-steps">
+        <li>Ouvrez cette page dans <strong>Safari</strong>.</li>
+        <li>Touchez le bouton <strong>Partager</strong> <span aria-hidden="true">⬆️</span> (en bas de l’écran).</li>
+        <li>Choisissez <strong>« Sur l’écran d’accueil »</strong>, puis <strong>Ajouter</strong>.</li>
+      </ol>
+      <p class="muted small">ICE MANAGER s’ouvrira ensuite en plein écran, comme une application, depuis son icône.</p>`,
+    foot: '<button class="btn btn-primary" data-close>J’ai compris</button>',
+  });
+}
+
+if (pwaSupported) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    pwa.prompt = e;
+    refreshInstall();
+  });
+  window.addEventListener('appinstalled', () => {
+    pwa.prompt = null;
+    refreshInstall();
+    toast('Application installée : ICE MANAGER est sur votre écran d’accueil.', 'ok');
+  });
+  window.addEventListener('offline', () => toast('Connexion perdue : les ventes ne peuvent pas être enregistrées pour l’instant.', 'err'));
+  window.addEventListener('online', () => { toast('Connexion rétablie.', 'ok'); route(); });
+  refreshInstall();
+}
+$('#login-install').addEventListener('click', installApp);
+
 $('#user-btn').addEventListener('click', (e) => {
   e.stopPropagation();
   $('#user-menu').hidden = !$('#user-menu').hidden;
@@ -519,6 +573,8 @@ $('#user-menu').addEventListener('click', async (e) => {
   const action = e.target.dataset.action;
   if (action === 'backdate') {
     openBackdateModal();
+  } else if (action === 'install') {
+    installApp();
   } else if (action === 'logout') {
     await api('POST', '/api/auth/logout').catch(() => {});
     state.activeTable = null;
@@ -2900,13 +2956,44 @@ function showSetup() {
   });
 }
 
+/** Pas de réseau à l'ouverture (application installée) : on le dit, et on réessaie dès que la connexion revient. */
+function showOffline(retry) {
+  showLogin();
+  const loginForm = $('#login-form');
+  loginForm.hidden = true;
+  const card = document.createElement('div');
+  card.className = 'login-card setup-card';
+  card.id = 'offline-card';
+  card.innerHTML = `
+    <div class="login-logo" aria-hidden="true">📡</div>
+    <h1>Hors connexion</h1>
+    <p>ICE MANAGER n’arrive pas à joindre le serveur. Vérifiez le Wi-Fi ou les données mobiles :
+      l’application se reconnecte toute seule dès que le réseau revient.</p>
+    <button class="btn btn-primary btn-lg btn-block" type="button" id="offline-retry">Réessayer</button>`;
+  loginForm.after(card);
+  const again = () => {
+    window.removeEventListener('online', again);
+    clearInterval(timer);
+    card.remove();
+    loginForm.hidden = false;
+    retry();
+  };
+  $('#offline-retry', card).addEventListener('click', again);
+  window.addEventListener('online', again);
+  // Certains téléphones ne signalent pas le retour du réseau : on vérifie aussi toutes les 10 secondes.
+  const timer = setInterval(() => {
+    fetch('/api/platform', { cache: 'no-store' }).then((r) => { if (r.ok) again(); }).catch(() => {});
+  }, 10000);
+}
+
 (async function init() {
   try {
     const me = await api('GET', '/api/auth/me');
     state.user = me.user;
     state.settings = me.settings;
     showApp();
-  } catch {
+  } catch (err) {
+    if (err.status === 0) { showOffline(init); return; }
     const platform = await api('GET', '/api/platform').catch(() => null);
     if (platform?.status === 'setup') showSetup();
     else showLogin();

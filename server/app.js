@@ -251,7 +251,15 @@ function createApp(db, { secureCookies = false, trustProxy = 'loopback' } = {}) 
   app.use('/api', (req, res, next) => next(new HttpError(404, 'Ressource introuvable.')));
 
   // ---------- Interface web ----------
-  app.use(express.static(path.join(__dirname, '..', 'public'), { index: 'index.html', maxAge: 0 }));
+  app.use(express.static(path.join(__dirname, '..', 'public'), {
+    index: 'index.html',
+    maxAge: 0,
+    setHeaders(res, file) {
+      // Le service worker doit toujours être revalidé : c'est lui qui déclenche les mises à jour de l'application.
+      if (file.endsWith(`${path.sep}sw.js`)) res.set('Cache-Control', 'no-cache');
+      if (file.endsWith('.webmanifest')) res.type('application/manifest+json');
+    },
+  }));
 
   // ---------- Gestion des erreurs ----------
   // eslint-disable-next-line no-unused-vars

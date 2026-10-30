@@ -26,6 +26,8 @@ clients, stock, rapports, statistiques. Interface et messages en **français**.
 - Dates : chaînes locales `YYYY-MM-DD HH:MM:SS` ; utiliser `req.now` / `req.today` (le responsable peut antidater
   via l'en-tête `X-Ice-Date`).
 - `public/` : interface monopage sans framework (`app.js`, `index.html`, `style.css`), thèmes clair/sombre, mobile d'abord.
+  Application installable (PWA) : `manifest.webmanifest`, `sw.js` (n'intercepte jamais `/api/`), `icons/`.
+  Ajouter tout nouveau fichier d'interface à la liste `SHELL` de `sw.js` et changer `CACHE` si nécessaire.
 - `demo/` : version navigateur. `build.js` regroupe le code serveur avec des remplacements (`demo/shims/`) :
   sql.js à la place de `node:sqlite`, SHA-256 à la place de scrypt. `main.js` intercepte `fetch('/api/…')`.
   `shared-store.js` partage la base entre appareils via la capacité `db` de l'artefact (instantanés + verrou).

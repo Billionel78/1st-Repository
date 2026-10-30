@@ -531,3 +531,12 @@ table.data .row { flex-wrap: nowrap; }
 }
 .purchase-summary .seg { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .purchase-summary .seg button { white-space: normal; line-height: 1.2; padding: .5rem .4rem; }
+
+/* ---------- Application installée (PWA) ---------- */
+.install-btn { margin-top: .25rem; }
+.install-steps { display: grid; gap: .6rem; padding-left: 1.3rem; margin: 0 0 1rem; line-height: 1.45; }
+@media (display-mode: standalone) {
+  /* Pas de sélection de texte accidentelle ni d'effet « rebond » en plein écran. */
+  body { overscroll-behavior-y: none; -webkit-user-select: none; user-select: none; }
+  input, textarea, select, [contenteditable] { -webkit-user-select: text; user-select: text; }
+}

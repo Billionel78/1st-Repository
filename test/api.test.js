@@ -47,6 +47,20 @@ for (const backend of BACKENDS) describe(backend.name, () => {
   const product = async (name) => (await admin('GET', '/api/products')).data.find((p) => p.name === name);
   const table = async (name) => (await admin('GET', '/api/tables')).data.find((t) => t.name === name);
 
+  test('application installable : manifeste, service worker et icônes servis', async () => {
+    const manifest = await fetch(`${baseUrl}/manifest.webmanifest`);
+    assert.equal(manifest.status, 200);
+    assert.match(manifest.headers.get('content-type'), /application\/manifest\+json/);
+    const m = await manifest.json();
+    assert.equal(m.display, 'standalone');
+    for (const icon of m.icons) assert.equal((await fetch(`${baseUrl}/${icon.src}`)).status, 200, icon.src);
+    const sw = await fetch(`${baseUrl}/sw.js`);
+    assert.equal(sw.status, 200);
+    assert.equal(sw.headers.get('cache-control'), 'no-cache');
+    const html = await (await fetch(`${baseUrl}/`)).text();
+    assert.match(html, /<link rel="manifest" href="manifest\.webmanifest">/);
+  });
+
   test('refuse les accès sans connexion et les mauvais identifiants', async () => {
     assert.equal((await admin('GET', '/api/families')).status, 401);
     assert.equal((await admin('POST', '/api/auth/login', { username: 'admin', password: 'nope' })).status, 401);

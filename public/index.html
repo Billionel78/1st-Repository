@@ -5,7 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0b4f8a">
   <title>ICE MANAGER</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A7%8A%3C/text%3E%3C/svg%3E">
+  <meta name="description" content="Gestion de bar : commandes, tables, paiements, stock et fournisseurs.">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="icons/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="ICE MANAGER">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -20,6 +28,7 @@
         <div id="user-menu" class="user-menu" role="menu" hidden>
           <div class="user-menu-role" id="user-role"></div>
           <button type="button" role="menuitem" data-action="backdate" id="menu-backdate" hidden>Saisir des ventes passées (rattrapage)</button>
+          <button type="button" role="menuitem" data-action="install" id="menu-install" hidden>📲 Installer l’application</button>
           <button type="button" role="menuitem" data-action="password">Changer mon mot de passe</button>
           <button type="button" role="menuitem" data-action="logout">Se déconnecter</button>
         </div>
@@ -44,6 +53,7 @@
       <p id="login-error" class="form-error" role="alert"></p>
       <button class="btn btn-primary btn-lg btn-block" type="submit">Se connecter</button>
       <button class="link-btn" type="button" id="forgot-link">Mot de passe oublié ?</button>
+      <button class="btn btn-block install-btn" type="button" id="login-install" hidden>📲 Installer l’application sur cet appareil</button>
     </form>
   </section>
 
