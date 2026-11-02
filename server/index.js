@@ -1,5 +1,9 @@
 'use strict';
 
+// Variables d'environnement d'un fichier .env à la racine (DATABASE_URL…), s'il existe. Jamais versionné.
+const path = require('node:path');
+try { process.loadEnvFile(path.join(__dirname, '..', '.env')); } catch { /* pas de fichier .env */ }
+
 const { openFromEnv, seed, hasUsers } = require('./db');
 const { createApp } = require('./app');
 

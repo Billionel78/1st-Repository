@@ -11,7 +11,8 @@
     "start": "node --disable-warning=ExperimentalWarning server/index.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
     "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.js\"",
-    "build:web": "node demo/build.js"
+    "build:web": "node demo/build.js",
+    "transfer:postgres": "node --disable-warning=ExperimentalWarning scripts/transfer-to-postgres.js"
   },
   "license": "UNLICENSED",
   "dependencies": {

@@ -52,6 +52,19 @@ DATABASE_URL="postgresql://utilisateur:motdepasse@hote/base?sslmode=require" npm
 - Les écritures sont sérialisées par un verrou PostgreSQL : plusieurs instances du serveur peuvent
   travailler sur la même base sans doublon de numéro de commande ni survente de stock.
 
+### Transférer une base SQLite vers PostgreSQL (Neon)
+
+```bash
+# DATABASE_URL dans le fichier .env (jamais versionné) ou dans l'environnement
+npm run transfer:postgres -- data/ice-manager.db
+```
+
+- Toutes les tables sont copiées dans l'ordre des clés étrangères, chaque table est recomptée, les compteurs
+  d'identifiants repartent après les données copiées ; le tout dans une seule transaction (tout ou rien).
+- Le fichier SQLite d'origine n'est jamais modifié. Les sessions ne sont pas copiées (il faudra se reconnecter).
+- Une base PostgreSQL qui contient déjà des données est refusée ; `--remplacer` l'efface et la remplace.
+- Ensuite : `npm start` avec la même `DATABASE_URL`.
+
 ## Mise en ligne (adresse publique permanente)
 
 ### Render (gratuit pour commencer)
