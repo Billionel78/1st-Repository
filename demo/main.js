@@ -313,6 +313,126 @@ async function ownerReset(body) {
   });
 }
 
+// ---------- Export de la base (responsable) : fichier SQLite utilisable ailleurs (Antigravity, Neon…) ----------
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+/** Archive zip sans compression (« stored ») : [{ name, data: Uint8Array }]. */
+function zip(files) {
+  const enc = new TextEncoder();
+  const now = new Date();
+  const time = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const date = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name);
+    const crc = crc32(f.data);
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true); local.setUint16(4, 20, true); local.setUint16(6, 0x0800, true);
+    local.setUint16(10, time, true); local.setUint16(12, date, true); local.setUint32(14, crc, true);
+    local.setUint32(18, f.data.length, true); local.setUint32(22, f.data.length, true); local.setUint16(26, name.length, true);
+    parts.push(new Uint8Array(local.buffer), name, f.data);
+    const dir = new DataView(new ArrayBuffer(46));
+    dir.setUint32(0, 0x02014b50, true); dir.setUint16(4, 20, true); dir.setUint16(6, 20, true); dir.setUint16(8, 0x0800, true);
+    dir.setUint16(12, time, true); dir.setUint16(14, date, true); dir.setUint32(16, crc, true);
+    dir.setUint32(20, f.data.length, true); dir.setUint32(24, f.data.length, true); dir.setUint16(28, name.length, true);
+    dir.setUint32(42, offset, true);
+    central.push(new Uint8Array(dir.buffer), name);
+    offset += 30 + name.length + f.data.length;
+  }
+  const size = central.reduce((a, p) => a + p.length, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+  end.setUint32(12, size, true); end.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, new Uint8Array(end.buffer)], { type: 'application/zip' });
+}
+
+const README_EXPORT = `ICE MANAGER — export de la base de données
+==========================================
+
+ice-manager.db : toute la base au format SQLite (produits et photos, commandes, paiements, clients,
+stock, fournisseurs, approvisionnements, utilisateurs). Les sessions de connexion n'y sont pas.
+
+Utiliser avec la version serveur (Antigravity, Render…) :
+  1. Copier ice-manager.db dans le dossier data/ du projet.
+  2. SQLite : npm start, puis se connecter avec les identifiants habituels.
+     PostgreSQL (Neon) : mettre DATABASE_URL dans le fichier .env, puis
+       npm run transfer:postgres -- data/ice-manager.db
+       npm start
+
+Ouvrir et consulter : DB Browser for SQLite, DBeaver, TablePlus…
+Montants en FCFA entiers ; dates au format AAAA-MM-JJ HH:MM:SS.
+`;
+
+async function exportDatabase() {
+  const user = await currentUser();
+  if (user?.role !== 'admin') return json(403, { error: 'Action réservée au responsable.' });
+  if (MODE === 'shared') {
+    // Dernière version publiée par tous les appareils.
+    await serialized(async () => {
+      const head = await shared.readHead();
+      if ((head?.version ?? 0) !== current.version) {
+        const snap = await shared.load();
+        await mount(snap.bytes, snap.version);
+      }
+    });
+  }
+  const SQL = globalThis.__SQL;
+  const copy = new SQL.Database(exportBytes());
+  let missing = 0;
+  try {
+    copy.run('DELETE FROM sessions');
+    // Photos stockées sur la plateforme : réintégrées dans la base pour qu'elle soit autonome.
+    const res = copy.exec("SELECT id, image_url FROM products WHERE image_url LIKE '/_blob/%'");
+    const rows = res[0]?.values ?? [];
+    const done = new Map();
+    const at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    for (const [productId, url] of rows) {
+      if (!done.has(url)) {
+        try {
+          const r = await nativeFetch(url);
+          if (!r.ok) throw new Error(String(r.status));
+          const blob = await r.blob();
+          const mime = /^image\/(jpeg|png|webp)$/.test(blob.type) ? blob.type : 'image/webp';
+          copy.run('INSERT INTO images (mime, data, created_at) VALUES (?, ?, ?)', [mime, toBase64(new Uint8Array(await blob.arrayBuffer())), at]);
+          done.set(url, `/api/images/${copy.exec('SELECT last_insert_rowid()')[0].values[0][0]}`);
+        } catch {
+          done.set(url, null);
+          missing++;
+        }
+      }
+      if (done.get(url)) copy.run('UPDATE products SET image_url = ? WHERE id = ?', [done.get(url), productId]);
+    }
+    copy.run('VACUUM');
+    const bytes = copy.export();
+    const settings = Object.fromEntries((copy.exec('SELECT key, value FROM settings')[0]?.values ?? []));
+    const blob = zip([
+      { name: 'ice-manager.db', data: bytes },
+      { name: 'LISEZMOI.txt', data: new TextEncoder().encode(README_EXPORT) },
+    ]);
+    return new Response(blob, {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/zip',
+        'X-Ice-Bar': encodeURIComponent(settings.bar_name || 'ICE MANAGER'),
+        'X-Ice-Missing-Photos': String(missing),
+      },
+    });
+  } finally {
+    copy.close();
+  }
+}
+
 // ---------- Photos des produits (responsable) ----------
 // Elles ne vont pas dans la base : sur la plateforme, elles sont stockées comme fichiers de l'artefact
 // (sinon chaque commande renverrait toutes les photos) ; dans la démo, elles restent dans le navigateur.
@@ -378,6 +498,7 @@ async function handle(url, init = {}) {
     if (path === '/api/platform/owner-reset' && method === 'POST') return ownerReset(body);
   }
   if (path === '/api/platform/backup' && method === 'GET') return backup();
+  if (path === '/api/platform/export-db' && method === 'GET') return exportDatabase();
   if (path === '/api/images' && method === 'POST') return uploadImage(body);
   if (path === '/api/platform/restore' && method === 'POST') return restore(body);
 

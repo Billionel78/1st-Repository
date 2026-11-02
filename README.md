@@ -52,6 +52,12 @@ DATABASE_URL="postgresql://utilisateur:motdepasse@hote/base?sslmode=require" npm
 - Les écritures sont sérialisées par un verrou PostgreSQL : plusieurs instances du serveur peuvent
   travailler sur la même base sans doublon de numéro de commande ni survente de stock.
 
+### Exporter la base depuis la plateforme en ligne (responsable)
+
+Gestion → Paramètres → **« Exporter la base (.db) »** : archive `.zip` contenant `ice-manager.db` (SQLite, photos
+réintégrées depuis la plateforme, sans les sessions) et un `LISEZMOI.txt`. Le zip est nécessaire : la plateforme
+n'autorise pas le téléchargement direct d'un fichier `.db`. Réservé au responsable.
+
 ### Transférer une base SQLite vers PostgreSQL (Neon)
 
 ```bash

@@ -155,7 +155,47 @@
             <input type="file" id="restore-file" accept=".json,application/json" hidden>
           </div>
           <p class="form-error" id="backup-error"></p>
+        </div>
+        <div class="card form-grid" style="max-width:520px;margin-top:1rem">
+          <h3>🗄️ Exporter la base de données</h3>
+          <p class="muted small">Fichier <strong>ice-manager.db</strong> (SQLite, photos comprises) dans une archive .zip :
+            à utiliser avec la version serveur (Antigravity, Render), à transférer vers PostgreSQL / Neon, ou à ouvrir
+            avec DB Browser for SQLite, DBeaver… Les mots de passe y restent chiffrés.</p>
+          <div><button class="btn btn-primary" type="button" id="export-db-btn">⬇️ Exporter la base (.db)</button></div>
+          <p class="form-error" id="export-db-error"></p>
         </div>`);
+      body.querySelector('#export-db-btn').addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        const error = body.querySelector('#export-db-error');
+        error.textContent = '';
+        btn.disabled = true;
+        const label = btn.textContent;
+        btn.textContent = 'Préparation de l’export…';
+        try {
+          const res = await fetch('/api/platform/export-db');
+          if (!res.ok) throw new Error((await res.json()).error);
+          const blob = await res.blob();
+          const missing = Number(res.headers.get('X-Ice-Missing-Photos') || 0);
+          const bar = decodeURIComponent(res.headers.get('X-Ice-Bar') || 'ICE MANAGER')
+            .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase();
+          const now = new Date();
+          const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+          const filename = `${bar || 'ice-manager'}_base_${stamp}.zip`;
+          const dl = await downloads();
+          if (!dl) throw new Error('Le téléchargement n’est pas disponible ici. Ouvrez la plateforme dans claude.ai.');
+          try {
+            await dl.save({ filename, data: blob });
+            toast(missing ? `Base exportée (${missing} photo(s) n’ont pas pu être incluses).` : 'Base exportée, photos comprises.', 'ok');
+          } catch (err) {
+            if (err?.code !== 'declined') throw new Error('Téléchargement impossible. Réessayez dans un instant.');
+          }
+        } catch (err) {
+          error.textContent = err.message;
+        } finally {
+          btn.disabled = false;
+          btn.textContent = label;
+        }
+      });
       body.querySelector('#backup-btn').addEventListener('click', async () => {
         const res = await fetch('/api/platform/backup');
         const data = await res.json();
